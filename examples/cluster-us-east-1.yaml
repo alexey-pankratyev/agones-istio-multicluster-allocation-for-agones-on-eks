@@ -56,7 +56,7 @@ spec:
         controller: 3
         extensions: 2
       karpenterNodePools:
-      - nodePoolName: gameservers-amd64
+      - nodePoolName: gameservers-arm64
         weight: "100"
         nodeclass:
           volumeEnabled: true
@@ -80,5 +80,5 @@ spec:
         - "8"
         - "16"
         instanceArch:
-        - amd64
-        taintKey: agones.dev/agones-gameservers-amd64
+        - arm64
+        taintKey: agones.dev/agones-gameservers-arm64

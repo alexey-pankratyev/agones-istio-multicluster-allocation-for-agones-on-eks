@@ -335,7 +335,7 @@ spec:
       template:
         spec:
           tolerations:
-          - key: agones.dev/agones-gameservers-amd64
+          - key: agones.dev/agones-gameservers-arm64
             operator: Equal
             value: "true"
             effect: NoExecute
@@ -361,7 +361,7 @@ spec:
       template:
         spec:
           tolerations:
-          - key: agones.dev/agones-gameservers-amd64
+          - key: agones.dev/agones-gameservers-arm64
             operator: Equal
             value: "true"
             effect: NoExecute
