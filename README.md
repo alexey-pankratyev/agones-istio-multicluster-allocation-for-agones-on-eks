@@ -1,438 +1,231 @@
 # Multi-Region Game Server Allocation on EKS with Agones and Istio
 
-> **TL;DR** — This repository contains production-tested Crossplane packages that wire together EKS, Agones, and Istio into a self-managing multi-region game server platform. A matchmaker sends one gRPC call; Istio's service mesh routes it to the nearest available game server — regardless of which cluster it lives in.
+> **TL;DR** - Two Crossplane claims. Two EKS clusters. One Istio mesh. A matchmaker that only needs a single gRPC endpoint to allocate game servers across regions.
 
 ---
 
-## The Problem: Players Hate Lag, Matchmakers Hate Complexity
+## The Problem
 
-Imagine you run a competitive online game. Your players span three continents. You want to always allocate the nearest game server, but you also need global failover when a region is under pressure. And your matchmaker shouldn't need to know the topology of your infrastructure.
+You run game servers on AWS. Players are in North America and Europe. You want the nearest cluster to handle allocation, but fall back to the other region when one is saturated. Your matchmaker should not care about cluster topology.
 
-The naive solution — one cluster per region, a load balancer per cluster, custom logic in the matchmaker — falls apart quickly. You end up with N different endpoints to manage, N certificate rotations, and a matchmaker that's become an infrastructure component.
+The standard approach — one NLB per cluster, custom endpoint logic in the matchmaker, per-cluster certificate management — becomes an operational burden at scale.
 
-The elegant solution is Agones multi-cluster allocation over an Istio service mesh. The matchmaker sends one request to a single virtual endpoint. The mesh routes it. The allocation happens wherever there's capacity.
-
-This post shows you how to build exactly that — declaratively, using Crossplane.
+The solution here: Agones multi-cluster allocation routed by an Istio service mesh. The matchmaker sets a `mesh-region` header. Istio routes it to the right regional allocator. `retryRemoteLocalities: true` handles cross-region failover automatically.
 
 ---
 
-## Architecture Overview
+## Repository Structure
 
 ```
-                          ┌─────────────────────────────────────────────────┐
-                          │              Crossplane Management Cluster      │
-                          │                                                 │
-                          │  ┌──────────────┐    ┌──────────────────────┐   │
-                          │  │  kubernetes  │    │   agones + istio     │   │
-                          │  │   package    │    │     packages         │   │
-                          │  └──────────────┘    └──────────────────────┘   │
-                          └─────────────────────────────────────────────────┘
-                                        │                   │
-                         ┌──────────────┘                   └──────────────┐
-                         ▼                                                 ▼
-          ┌──────────────────────────┐                  ┌──────────────────────────┐
-          │   EKS Cluster us-east-1  │                  │   EKS Cluster eu-west-1  │
-          │                          │                  │                          │
-          │  ┌────────────────────┐  │                  │  ┌────────────────────┐  │
-          │  │  istiod            │  │◄── mTLS mesh ───►│  │  istiod            │  │
-          │  │  east-west gateway │  │   (port 15443)   │  │  east-west gateway │  │
-          │  └────────────────────┘  │                  │  └────────────────────┘  │
-          │                          │                  │                          │
-          │  ┌────────────────────┐  │                  │  ┌────────────────────┐  │
-          │  │  agones-allocator  │  │                  │  │  agones-allocator  │  │
-          │  │  (ClusterIP + Istio│  │                  │  │  (ClusterIP + Istio│  │
-          │  │   sidecar)         │  │                  │  │   sidecar)         │  │
-          │  └────────────────────┘  │                  │  └────────────────────┘  │
-          │                          │                  │                          │
-          │  ┌────────────────────┐  │                  │  ┌────────────────────┐  │
-          │  │  Game Servers      │  │                  │  │  Game Servers      │  │
-          │  │  (Karpenter SPOT)  │  │                  │  │  (Karpenter SPOT)  │  │
-          │  └────────────────────┘  │                  │  └────────────────────┘  │
-          └──────────────────────────┘                  └──────────────────────────┘
-                         ▲                                           ▲
-                         │            mesh-region: eu-west-1         │
-                         └───────────── Matchmaker ──────────────────┘
-                                    (single gRPC endpoint)
+.
+├── README.md
+├── packages/
+│   ├── eks-cluster/          # EKS + IAM + addons + Karpenter + cert-manager
+│   │   ├── definition.yaml   # XRD: KubernetesCluster API
+│   │   ├── aws.yaml          # Composition: wires eks-cluster → agones → istio
+│   │   └── crossplane.yaml
+│   ├── agones/               # Agones HA allocator + Karpenter game server pools
+│   │   ├── definition.yaml   # XRD: AgonesCluster API
+│   │   ├── aws.yaml          # Composition: Agones Helm + NodePools
+│   │   └── crossplane.yaml
+│   └── istio/                # istiod + east-west gateway + mesh routing
+│       ├── definition.yaml   # XRD: Istio API
+│       ├── aws.yaml          # Composition: Istio Helm + VirtualService + DestinationRule
+│       └── crossplane.yaml
+└── examples/
+    ├── cluster-us-east-1.yaml   # Full claim: EKS + Agones + Istio in us-east-1
+    └── cluster-eu-west-1.yaml   # Full claim: EKS + Agones + Istio in eu-west-1
 ```
 
-The matchmaker sets a `mesh-region` header on its allocation request. Istio's VirtualService routes it to the correct regional subset. If the local cluster has capacity, it handles the allocation locally. If not — thanks to `retryRemoteLocalities: true` — Istio retries transparently against another region.
+**One claim per cluster.** The `eks-cluster` Composition calls the `agones` and `istio` packages as nested composite resources — you do not apply separate Agones or Istio claims.
 
 ---
 
-## Why Crossplane Packages?
+## Architecture
 
-Before diving into the code, let's talk about the delivery model.
+### Istio Multi-Primary on Different Networks
 
-Instead of writing Terraform or Helm values files per environment, we define **Crossplane Compositions** — reusable templates that accept parameters and produce real cloud resources. A "claim" is just a small YAML file that says *what* you want; the Composition says *how* to build it.
-
-The three packages in this repository follow a layered model:
+This setup follows the [Istio multi-primary on different networks](https://istio.io/latest/docs/setup/install/multicluster/multi-primary_multi-network/) model. Each cluster runs its own istiod control plane (multi-primary), and the clusters are on separate VPC networks (different networks). Cross-cluster traffic flows through the east-west gateway on port 15443.
 
 ```
-packages/
-├── eks-cluster/    # EKS + IAM + addons + Karpenter + cert-manager
-├── agones/         # Agones HA + Karpenter NodePools for game servers  
-└── istio/          # Istio control plane + east-west gateway + mesh routing rules
+  Management Cluster (Crossplane)
+  ┌────────────────────────────────────────────────────┐
+  │  Namespace: demo                                   │
+  │  ┌──────────────────────┐ ┌──────────────────────┐ │
+  │  │ KubernetesCluster    │ │ KubernetesCluster    │ │
+  │  │ gameserver-us-east-1 │ │ gameserver-eu-west-1 │ │
+  │  └──────────┬───────────┘ └──────────┬───────────┘ │
+  │             │ reconciles              │ reconciles   │
+  │  ┌──────────▼─────────────────────────▼───────────┐ │
+  │  │  Crossplane Compositions (eks-cluster package) │ │
+  │  │  → creates XAgonesCluster + XIstio nested XRs  │ │
+  │  └────────────────────────────────────────────────┘ │
+  │                                                    │
+  │  cert-manager namespace                            │
+  │  Secret: istio-ca  ◄── created by primary cluster  │
+  │  (shared root CA for all clusters in the mesh)     │
+  └────────────────────────────────────────────────────┘
+            │                          │
+            │ AWS API                  │ AWS API
+            ▼                          ▼
+  ┌─────────────────────┐    ┌─────────────────────────┐
+  │  EKS: us-east-1     │    │  EKS: eu-west-1          │
+  │  VPC: 10.0.0.0/16   │    │  VPC: 10.1.0.0/16        │
+  │                     │    │                          │
+  │  ┌───────────────┐  │    │  ┌───────────────────┐   │
+  │  │ istiod        │  │    │  │ istiod             │   │
+  │  │ (multi-       │  │    │  │ (multi-primary,    │   │
+  │  │  primary)     │  │    │  │  independent CP)   │   │
+  │  └───────────────┘  │    │  └───────────────────┘   │
+  │                     │    │                          │
+  │  ┌───────────────┐  │    │  ┌───────────────────┐   │
+  │  │ east-west     │◄─┼────┼─►│ east-west         │   │
+  │  │ gateway       │  │    │  │ gateway            │   │
+  │  │ NLB:15443     │  │    │  │ NLB:15443          │   │
+  │  └───────────────┘  │    │  └───────────────────┘   │
+  │  Network:           │    │  Network:                 │
+  │  us-east-1-istio-   │    │  eu-west-1-istio-        │
+  │  network            │    │  network                  │
+  └─────────────────────┘    └─────────────────────────┘
 ```
 
-This mirrors the delivery chain: infrastructure first, then Agones, then the service mesh on top.
+**Multi-primary** means each istiod is independent — there is no single point of failure in the control plane. If us-east-1 istiod goes down, the eu-west-1 data plane continues to work.
+
+**Different networks** means the two VPCs are not peered or connected at the L3 level. All cross-cluster pod-to-pod traffic is tunnelled through the east-west gateway on port 15443 using SNI-based AUTO_PASSTHROUGH.
+
+### Remote Secret Exchange (Service Discovery)
+
+For istiod in each cluster to discover services in the other cluster, it needs read access to the remote Kubernetes API. Crossplane automates this:
+
+```
+Management cluster
+┌───────────────────────────────────────────────────────────┐
+│                                                           │
+│  Namespace: gameserver-us-east-1                          │
+│  Secret: istio-remote-secret-gameserver-us-east-1         │
+│  (written by us-east-1 Istio package)                     │
+│                        │                                  │
+│                        │  Crossplane copies via reference │
+│                        ▼                                  │
+│  Namespace: gameserver-eu-west-1                          │
+│  Secret: istio-remote-secret-gameserver-us-east-1         │
+│  (consumed by eu-west-1 istio package → placed on         │
+│   eu-west-1 cluster in namespace istio-system)            │
+│                                                           │
+│  (same pattern in reverse for eu-west-1 → us-east-1)     │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Shared Root CA
+
+Cross-cluster mTLS requires a shared trust root. All clusters must use the same root CA so workload certificates are mutually trusted.
+
+```
+Management cluster cert-manager
+┌────────────────────────────────────────────────────────┐
+│                                                        │
+│  ClusterIssuer: istio-root-ca-selfsigned               │
+│         │                                              │
+│         │ issues                                       │
+│         ▼                                              │
+│  Certificate: istio-ca  →  Secret: istio-ca            │
+│  (isCA: true, ECDSA P-256, 10yr validity)              │
+│         │                                              │
+│         │  Crossplane references (data copy)           │
+│         ├──────────────────────────────────────────┐   │
+│         ▼                                          ▼   │
+│  us-east-1 cluster             eu-west-1 cluster       │
+│  Secret: cacerts               Secret: cacerts         │
+│  (istio-system)                (istio-system)          │
+│                                                        │
+│  istiod signs workload certs from this shared root     │
+│  → mutual trust across clusters without config         │
+└────────────────────────────────────────────────────────┘
+```
+
+Exactly **one cluster** should have `istio.primary: true`. That cluster's Composition creates the `istio-ca` Certificate and ClusterIssuer on the management cluster. All other clusters set `primary: false` and receive the CA via Crossplane namespace references.
+
+### Agones Multi-Cluster Allocation Flow
+
+The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It calls the local agones-allocator service. Istio intercepts the call on the sidecar and, based on the `mesh-region` header, routes it to the appropriate regional allocator — either locally or across clusters via the east-west gateway.
+
+```
+  us-east-1 cluster
+  ┌────────────────────────────────────────────────────────────────┐
+  │                                                                │
+  │  ┌──────────────────┐                                         │
+  │  │  Matchmaker pod  │                                         │
+  │  │  (agones-        │                                         │
+  │  │   gameservers ns)│                                         │
+  │  └────────┬─────────┘                                         │
+  │           │  gRPC call to:                                     │
+  │           │  agones-allocator.agones-system.svc.cluster.local  │
+  │           │  Header: mesh-region: eu-west-1                    │
+  │           │                                                    │
+  │           ▼  (Istio sidecar intercepts)                        │
+  │  ┌────────────────────────────────────────┐                   │
+  │  │  Envoy (matchmaker sidecar)             │                   │
+  │  │  Looks up VirtualService rule:          │                   │
+  │  │    mesh-region: eu-west-1               │                   │
+  │  │    → subset eu-west-1                   │                   │
+  │  │    → host agones-allocator...           │                   │
+  │  │      routed via east-west GW endpoint   │                   │
+  │  └────────────────┬───────────────────────┘                   │
+  │                   │  mTLS (ISTIO_MUTUAL)                       │
+  │                   ▼                                            │
+  │  ┌────────────────────────────────────────┐                   │
+  │  │  East-west gateway (us-east-1)          │                   │
+  │  │  NLB port 15443                         │                   │
+  │  │  SNI: agones-allocator.agones-system    │                   │
+  │  │       .svc.cluster.local                │                   │
+  │  │  AUTO_PASSTHROUGH — TLS not terminated  │                   │
+  │  └────────────────┬───────────────────────┘                   │
+  └───────────────────┼────────────────────────────────────────────┘
+                      │  NLB → NLB  (cross-region: TGW or internet)
+                      ▼
+  eu-west-1 cluster
+  ┌────────────────────────────────────────────────────────────────┐
+  │                   │                                            │
+  │  ┌────────────────▼───────────────────────┐                   │
+  │  │  East-west gateway (eu-west-1)          │                   │
+  │  │  Matches SNI → routes to local service  │                   │
+  │  └────────────────┬───────────────────────┘                   │
+  │                   │                                            │
+  │                   ▼                                            │
+  │  ┌────────────────────────────────────────┐                   │
+  │  │  agones-allocator pod (eu-west-1)       │                   │
+  │  │  Finds a Ready GameServer               │                   │
+  │  │  Returns: NodeIP, port, credentials     │                   │
+  │  └────────────────────────────────────────┘                   │
+  │                                                                │
+  │  ┌────────────────────────────────────────┐                   │
+  │  │  Karpenter game server nodes (SPOT)     │                   │
+  │  │  Fleet: 5 × Ready GameServer pods       │                   │
+  │  └────────────────────────────────────────┘                   │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+**Same topology exists on eu-west-1** — it also has a matchmaker, local agones-allocator, and Istio mesh. A matchmaker on eu-west-1 can in exactly the same way route allocations to us-east-1 by setting `mesh-region: us-east-1`.
+
+The `retryRemoteLocalities: true` policy means if the target regional allocator returns a retryable error (no Ready servers, connection refused), Envoy retries against other subsets automatically — no matchmaker logic required.
 
 ---
 
-## Package 1: EKS Cluster
-
-The `eks-cluster` package provisions everything a production EKS cluster needs: IAM roles, node groups, EKS addons, Karpenter for dynamic scaling, and cert-manager for certificate management.
-
-The definition (`packages/eks-cluster/definition.yaml`) exposes a clean API:
-
-```yaml
-apiVersion: demo.crossplane.io/v1alpha1
-kind: KubernetesCluster
-metadata:
-  name: gameserver-us-east-1
-  namespace: demo
-spec:
-  id: gameserver-us-east-1
-  parameters:
-    region: us-east-1
-    version: "1.32"
-    awsAccountNumber: "123456789012"
-    vpcId: vpc-0123456789abcdef0
-    subnetIds: [...]
-    karpenterVersion: "1.4.0"
-    # Toggle the entire Agones stack on/off
-    agones:
-      enabled: true
-      version: "1.48.0"
-    # Toggle the Istio service mesh
-    istio:
-      enabled: true
-      version: "1.26.2"
-      meshID: demo-mesh
-      multicluster:
-        enabled: true
-        rules:
-        - clusterName: gameserver-eu-west-1
-          region: eu-west-1
-```
-
-The Composition (`packages/eks-cluster/aws.yaml`) translates this into EKS cluster, IAM roles, node groups, addons, Karpenter, and cert-manager — all as Crossplane managed resources that are continuously reconciled.
-
-Key excerpt from the Composition — game server UDP port exposure:
-
-```yaml
-# Security group rule: game server UDP ports
-apiVersion: ec2.aws.upbound.io/v1beta1
-kind: SecurityGroupRule
-metadata:
-  name: {{ $id }}-sgr-gameserver-udp
-spec:
-  forProvider:
-    region: {{ $params.region }}
-    cidrBlocks:
-    - 0.0.0.0/0
-    fromPort: 7000
-    toPort: 8000
-    protocol: udp
-    type: ingress
-```
-
----
-
-## Package 2: Agones with Istio-Aware Configuration
-
-The `agones` package handles the Agones installation. The interesting part is how it switches behavior based on whether Istio is present.
-
-**Without Istio**, the Agones allocator uses NLB + direct mTLS:
-
-```yaml
-# Non-Istio mode: NLB with direct mTLS
-service:
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
-  grpc:
-    enabled: true
-    port: 8443
-```
-
-**With Istio**, the allocator becomes a ClusterIP service. TLS is disabled on the allocator itself — Istio's mTLS handles it transparently:
-
-```yaml
-# Istio mode: ClusterIP — east-west gateway handles cross-cluster routing
-{{- if $istioEnabled }}
-- name: agones.allocator.disableTLS
-  value: "true"
-{{- end }}
-
-service:
-  {{- if $istioEnabled }}
-  annotations:
-    blitz.agones.dev/allocator-host: agones-allocator.agones-system.svc.cluster.local
-  serviceType: ClusterIP
-  http:
-    enabled: true
-    port: 443
-    portName: http-rest    # Prefix 'http-' tells Istio to use HTTP protocol with mTLS
-    targetPort: 8443
-  {{- end }}
-```
-
-The `portName: http-rest` naming convention is crucial — the `http-` prefix signals to Istio that it should treat this port as HTTP (enabling features like retries, timeouts, and header-based routing), while still wrapping it in mTLS.
-
-The `agones-system` namespace gets the Istio network label, which is required for service discovery across clusters:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: agones-system
-  labels:
-    istio-injection: enabled
-    # Required for Istio multi-network/multicluster service discovery
-    topology.istio.io/network: {{ $id }}-istio-network
-```
-
----
-
-## Package 3: Istio — The Mesh That Connects Everything
-
-This is where the magic happens. The Istio package (`packages/istio/aws.yaml`) does several things:
-
-### Shared Root CA for Cross-Cluster mTLS
-
-For mTLS to work across clusters, all clusters must share the same root CA. Crossplane copies the CA from the management cluster's cert-manager secret into each workload cluster's `cacerts` secret:
-
-```yaml
-# cacerts secret consumed by istiod for signing workload certificates.
-# All clusters must share the same root CA for cross-cluster mTLS to work.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cacerts
-  namespace: istio-system
-type: Opaque
-data:
-  root-cert.pem: {{ $rootCertB64 | quote }}
-  ca-cert.pem: {{ $caCertB64 | quote }}
-  ca-key.pem: {{ $caKeyB64 | quote }}
-  cert-chain.pem: {{ $certChainB64 | quote }}
-```
-
-### meshNetworks — Mapping Networks to Gateways
-
-The `meshNetworks` configuration in istiod tells the control plane how to reach services in other clusters. Each entry maps a network name to the east-west gateway that fronts it:
-
-```yaml
-global:
-  meshID: demo-mesh
-  meshNetworks:
-    # Local cluster
-    gameserver-us-east-1-istio-network:
-      endpoints:
-        - fromRegistry: gameserver-us-east-1
-      gateways:
-        - registryServiceName: gameserver-us-east-1-istio-eastwestgateway.istio-system.svc.cluster.local
-          port: 15443
-    # Remote cluster — eu-west-1
-    gameserver-eu-west-1-istio-network:
-      endpoints:
-        - fromRegistry: gameserver-eu-west-1
-      gateways:
-        - registryServiceName: gameserver-eu-west-1-istio-eastwestgateway.istio-system.svc.cluster.local
-          port: 15443
-  multiCluster:
-    clusterName: gameserver-us-east-1
-  network: gameserver-us-east-1-istio-network
-```
-
-### East-West Gateway
-
-The east-west gateway is the cross-cluster data plane. It exposes port 15443 with `AUTO_PASSTHROUGH` mode — Istio SNI-routes traffic to the correct service on the remote cluster without terminating TLS:
-
-```yaml
-# cross-network-gateway: tells the east-west gateway to auto-passthrough
-# TLS for any *.local host — required for cross-cluster service access.
-apiVersion: networking.istio.io/v1alpha3
-kind: Gateway
-metadata:
-  name: cross-network-gateway
-  namespace: istio-system
-spec:
-  selector:
-    istio: eastwestgateway
-  servers:
-  - port:
-      number: 15443
-      name: tls
-      protocol: TLS
-    tls:
-      mode: AUTO_PASSTHROUGH
-    hosts:
-    - "*.local"
-```
-
-The gateway itself gets an AWS NLB via annotations:
-
-```yaml
-service:
-  type: LoadBalancer
-  ports:
-  - name: tls
-    port: 15443
-    targetPort: 15443
-    nodePort: 31443
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external
-    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
-    service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
-```
-
-### Remote Secrets — The Cluster Discovery Mechanism
-
-For each cluster to discover services in other clusters, istiod needs credentials to read the remote Kubernetes API. These are called "remote secrets."
-
-Crossplane automates this: each cluster's Istio package creates a remote secret for itself, then copies the remote secrets from peer clusters:
-
-```yaml
-# Remote secret for THIS cluster — placed on every peer cluster so istiod
-# there can discover services running here.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: istio-remote-secret-gameserver-us-east-1
-  namespace: istio-system
-  annotations:
-    networking.istio.io/cluster: gameserver-us-east-1
-  labels:
-    istio/multiCluster: "true"
-stringData:
-  gameserver-us-east-1: |
-    apiVersion: v1
-    clusters:
-    - cluster:
-        certificate-authority-data: <ca-data>
-        server: https://<api-endpoint>
-      name: gameserver-us-east-1
-    ...
-    users:
-    - name: gameserver-us-east-1
-      user:
-        token: <istio-reader-token>
-```
-
-### Header-Based Routing for Regional Allocation
-
-The VirtualService is where the routing logic lives. The matchmaker sets a `mesh-region` header, and Istio routes the request to the corresponding regional subset:
-
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: allocator-multicluster
-  namespace: agones-system
-spec:
-  hosts:
-  - agones-allocator.agones-system.svc.cluster.local
-  http:
-  # Route to us-east-1 allocators
-  - match:
-    - headers:
-        mesh-region:
-          exact: us-east-1
-    retries:
-      attempts: 3
-      perTryTimeout: 2s
-      retryOn: 429,409,connect-failure,reset,refused-stream,unavailable,cancelled,retriable-status-codes,resource-exhausted
-      retryRemoteLocalities: true
-    timeout: 6s
-    route:
-    - destination:
-        host: agones-allocator.agones-system.svc.cluster.local
-        subset: us-east-1
-        port:
-          number: 443
-  # Route to eu-west-1 allocators (cross-cluster via east-west gateway)
-  - match:
-    - headers:
-        mesh-region:
-          exact: eu-west-1
-    retries:
-      attempts: 3
-      perTryTimeout: 2s
-      retryOn: 429,409,connect-failure,reset,refused-stream,unavailable,cancelled,retriable-status-codes,resource-exhausted
-      retryRemoteLocalities: true
-    timeout: 6s
-    route:
-    - destination:
-        host: agones-allocator.agones-system.svc.cluster.local
-        subset: eu-west-1
-        port:
-          number: 443
-  # Fallback: reject requests with missing/unknown mesh-region header
-  - directResponse:
-      status: 400
-      body:
-        string: '{"message":"missing or invalid mesh-region header"}'
-    headers:
-      response:
-        set:
-          content-type: application/json
-```
-
-The DestinationRule marks each regional allocator deployment with a subset label:
-
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: allocator-multicluster
-  namespace: agones-system
-spec:
-  host: agones-allocator.agones-system.svc.cluster.local
-  trafficPolicy:
-    tls:
-      mode: ISTIO_MUTUAL
-  subsets:
-  - name: us-east-1
-    labels:
-      mesh-region: us-east-1
-  - name: eu-west-1
-    labels:
-      mesh-region: eu-west-1
-    trafficPolicy:
-      tls:
-        mode: ISTIO_MUTUAL
-      outlierDetection:
-        consecutiveErrors: 5
-        interval: 30s
-        baseEjectionTime: 30s
-```
-
-And the Agones allocator pod gets the `mesh-region` label so Istio can select the right subset:
-
-```yaml
-# In the agones package, the allocator gets a region label
-allocator:
-  labels:
-    mesh-region: us-east-1
-  annotations:
-    sidecar.istio.io/inject: "true"
-```
-
----
-
-## Deployment Walk-Through
+## Deployment
 
 ### Prerequisites
 
-- Crossplane installed on a management cluster
-- Crossplane providers: `provider-aws`, `provider-kubernetes`, `provider-helm`
-- Crossplane functions: `function-go-templating`, `function-auto-ready`
-- A shared cert-manager CA secret named `istio-ca` in the `cert-manager` namespace
+| Component | Purpose |
+|---|---|
+| Management EKS cluster | Runs Crossplane, cert-manager |
+| Crossplane ≥ 1.18 | Composition engine |
+| `provider-aws` (upbound) | EKS, IAM, EC2 resources |
+| `provider-kubernetes` | Kubernetes Object resources |
+| `provider-helm` | Helm Release resources |
+| `function-go-templating` | Go template Composition function |
+| `function-auto-ready` | Readiness detection function |
 
-### Step 1 — Install the Crossplane packages
+### Step 1 — Install Crossplane packages on the management cluster
 
 ```bash
 kubectl apply -f packages/eks-cluster/
@@ -440,57 +233,93 @@ kubectl apply -f packages/agones/
 kubectl apply -f packages/istio/
 ```
 
-### Step 2 — Claim the first cluster (us-east-1)
+Wait for XRDs to become established:
+
+```bash
+kubectl wait xrd xkubernetesclusters.demo.crossplane.io --for=condition=Established --timeout=60s
+kubectl wait xrd xagonesclusters.demo.crossplane.io     --for=condition=Established --timeout=60s
+kubectl wait xrd xistios.demo.crossplane.io             --for=condition=Established --timeout=60s
+```
+
+### Step 2 — Create the namespace for claims
+
+```bash
+kubectl create namespace demo
+```
+
+### Step 3 — Apply the primary cluster claim (us-east-1)
 
 ```bash
 kubectl apply -f examples/cluster-us-east-1.yaml
 ```
 
-Crossplane starts reconciling. Watch progress:
+This claim has `istio.primary: true`. The Composition will:
+1. Create the Istio root CA (`istio-ca` Secret) in `cert-manager` on the management cluster
+2. Provision the EKS cluster in us-east-1
+3. Install cert-manager, Karpenter, EKS addons
+4. Install Agones via the `agones` nested XR
+5. Install Istio (istiod + east-west gateway) via the `istio` nested XR
+
+Watch progress:
 
 ```bash
-kubectl get kubernetescluster gameserver-us-east-1 -w
-kubectl get managed -l crossplane.io/claim-name=gameserver-us-east-1
+# Overall claim status
+kubectl get kubernetescluster gameserver-us-east-1 -n demo -w
+
+# All managed resources
+kubectl get managed -l crossplane.io/claim-name=gameserver-us-east-1 -n demo
+
+# EKS cluster specifically
+kubectl get cluster.eks.aws.upbound.io gameserver-us-east-1 -w
 ```
 
-The EKS cluster, IAM roles, node groups, Karpenter, and cert-manager are all created automatically. Once the cluster is `ACTIVE`, apply the Agones and Istio claims:
-
-```bash
-kubectl apply -f examples/agones-claim-us-east-1.yaml
-kubectl apply -f examples/istio-claim-us-east-1.yaml
-```
-
-### Step 3 — Claim the second cluster (eu-west-1)
+### Step 4 — Apply the secondary cluster claim (eu-west-1)
 
 ```bash
 kubectl apply -f examples/cluster-eu-west-1.yaml
-# ... wait for cluster to be ACTIVE ...
-kubectl apply -f examples/agones-claim-eu-west-1.yaml  # create from the example template
-kubectl apply -f examples/istio-claim-eu-west-1.yaml
 ```
 
-### Step 4 — Verify cross-cluster connectivity
+This claim has `istio.primary: false`. The Composition will:
+1. Copy the `istio-ca` Secret from `cert-manager` into this cluster's `istio-system`
+2. Provision the EKS cluster in eu-west-1
+3. Install the same base components
+4. Install Agones with `istio.enabled: true`
+5. Install Istio pointing at us-east-1 as a peer cluster
 
-Once both clusters are up, verify the east-west gateways can reach each other:
+### Step 5 — Verify the Istio mesh
+
+After both clusters are ready, verify cross-cluster service discovery:
 
 ```bash
-# On cluster us-east-1
-kubectl get svc -n istio-system gameserver-us-east-1-istio-eastwestgateway
+# Get kubeconfigs written by ClusterAuth
+kubectl get secret gameserver-us-east-1-kubeconfig -n crossplane-system -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/us-east-1.kubeconfig
+kubectl get secret gameserver-eu-west-1-kubeconfig -n crossplane-system -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/eu-west-1.kubeconfig
 
-# Check istiod has discovered remote services
-istioctl remote-clusters --context=gameserver-us-east-1
-# Should show: gameserver-eu-west-1  synced
+# Check remote cluster discovery from us-east-1
+istioctl remote-clusters --kubeconfig=/tmp/us-east-1.kubeconfig
+# NAME                      SECRET                                    STATUS    ISTIOD
+# gameserver-eu-west-1      istio-remote-secret-gameserver-eu-west-1  synced    istiod-xxx
 
-# Verify remote secrets are present
-kubectl get secrets -n istio-system -l istio/multiCluster=true
-# Should show secrets for both clusters
+# Verify east-west gateways are reachable
+kubectl get svc --kubeconfig=/tmp/us-east-1.kubeconfig -n istio-system \
+  gameserver-us-east-1-istio-eastwestgateway
+# Should show an EXTERNAL-IP (NLB hostname)
+
+# Verify cacerts are present and identical on both clusters
+kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/us-east-1.kubeconfig \
+  -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
+
+kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/eu-west-1.kubeconfig \
+  -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
+# Fingerprints must match — same root CA
 ```
 
-### Step 5 — Test multi-region allocation
+### Step 6 — Deploy a Fleet and test allocation
 
-Deploy a Fleet on each cluster:
+Deploy the same Fleet on both clusters:
 
-```yaml
+```bash
+cat <<EOF | kubectl apply --kubeconfig=/tmp/us-east-1.kubeconfig -f -
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
@@ -513,142 +342,154 @@ spec:
           containers:
           - name: server
             image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34
+EOF
+
+# Same on eu-west-1
+cat <<EOF | kubectl apply --kubeconfig=/tmp/eu-west-1.kubeconfig -f -
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: demo-gameserver
+  namespace: agones-gameservers
+spec:
+  replicas: 5
+  template:
+    spec:
+      ports:
+      - name: default
+        containerPort: 7777
+      template:
+        spec:
+          tolerations:
+          - key: agones.dev/agones-gameservers-amd64
+            operator: Equal
+            value: "true"
+            effect: NoExecute
+          containers:
+          - name: server
+            image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34
+EOF
 ```
 
-Allocate a game server targeting `eu-west-1` from the `us-east-1` cluster:
+Test allocation targeting eu-west-1 from a pod running in us-east-1:
 
 ```bash
-# Using grpc-curl or agones-allocator client
-# The mesh-region header tells Istio which region to route to
-kubectl exec -it deploy/agones-allocator -n agones-system -- \
-  /allocator \
-  --host=agones-allocator.agones-system.svc.cluster.local:443 \
-  --namespace=agones-gameservers \
-  --multicluster=true \
-  --header="mesh-region: eu-west-1"
-```
+# Run a test pod on us-east-1
+kubectl run allocator-test --kubeconfig=/tmp/us-east-1.kubeconfig \
+  --image=ghcr.io/googleforgames/agones/allocator:1.48.0 \
+  --restart=Never --rm -it -- /bin/sh
 
-The request travels: local allocator → Istio sidecar → east-west gateway (us-east-1) → east-west gateway (eu-west-1) → remote allocator → game server assigned.
+# Inside the pod — allocate from eu-west-1 via the mesh
+# The mesh-region header tells Istio's VirtualService which subset to route to
+grpc_cli call \
+  agones-allocator.agones-system.svc.cluster.local:443 \
+  agones.dev.Allocator.Allocate \
+  "namespace: 'agones-gameservers', multi_cluster_setting: {enabled: true}" \
+  --metadata "mesh-region:eu-west-1"
+# Returns a GameServer from eu-west-1 cluster
+```
 
 ---
 
-## Production Considerations
+## Key Design Decisions
 
-### Karpenter for Game Server Nodes
+### Why `primary: true` on exactly one cluster?
 
-Game servers have a unique scaling pattern: you need nodes fast when a match starts, but you want to drain them quickly when they finish. Karpenter handles this well with the `WhenEmpty` consolidation policy:
+The shared Istio root CA must be created once. In a real production setup this is typically done by Terraform before any EKS clusters exist. The `primary: true` flag gives you the same result declaratively — Crossplane creates the CA Certificate on the management cluster's cert-manager. All cluster-level `istio` packages then reference it via `namespace/secret` path.
+
+If you have an existing CA (from Terraform or another PKI), set `primary: false` on all clusters and create the `istio-ca` Secret in cert-manager manually before applying any claims.
+
+### Why nested XRs (not separate claims)?
+
+The `eks-cluster` Composition creates `XAgonesCluster` and `XIstio` composite resources inline. This means:
+- **One `kubectl apply`** provisions everything
+- **Lifecycle is tied** — deleting the cluster claim cascades to Agones and Istio resources
+- **Parameters flow down** — the EKS cluster endpoint and CA data discovered by Crossplane are passed automatically to the Istio package (no manual OIDC/CA copy step)
+
+### Why `portName: http-rest` on the Agones allocator service?
+
+The `http-` prefix is Istio's protocol sniffing convention. It tells Envoy to treat this port as HTTP/2 (which gRPC uses), enabling retries, timeouts, and header-based routing. Without this prefix, Istio treats the port as raw TCP and the VirtualService routing rules do not apply.
+
+```yaml
+# In agones package — Istio mode
+service:
+  http:
+    portName: http-rest   # ← "http-" prefix = Istio applies L7 routing
+    targetPort: 8443
+```
+
+### Why `AUTO_PASSTHROUGH` on the east-west gateway?
+
+The east-west gateway uses SNI routing — it reads the TLS SNI field to determine which backend service to forward to, without terminating the TLS session. This means:
+- The allocator's mTLS identity is preserved end-to-end
+- No certificate pinning issues
+- The gateway configuration is static — it works for any service, not just Agones
+
+---
+
+## Routing Logic Reference
+
+### VirtualService (generated by istio package)
+
+```
+mesh-region: us-east-1  →  subset us-east-1  →  local agones-allocator
+mesh-region: eu-west-1  →  subset eu-west-1  →  remote agones-allocator (via east-west GW)
+<missing header>         →  HTTP 400
+```
+
+### DestinationRule subsets
+
+```
+subset: us-east-1   →  pods with label mesh-region=us-east-1
+subset: eu-west-1   →  pods with label mesh-region=eu-west-1
+                        + outlierDetection (eject after 5 consecutive errors)
+```
+
+The Agones allocator pods get `mesh-region: <region>` label from the agones package (injected when `istio.enabled: true`).
+
+### Retry policy
+
+```yaml
+retries:
+  attempts: 3
+  perTryTimeout: 2s
+  retryOn: 429,409,connect-failure,reset,refused-stream,unavailable,cancelled,
+           retriable-status-codes,resource-exhausted
+  retryRemoteLocalities: true   # ← allows cross-cluster retry
+timeout: 6s
+```
+
+`retryRemoteLocalities: true` is what enables automatic failover — if the target regional allocator returns a retryable error (no servers available, connection refused), Envoy retries against other subsets.
+
+---
+
+## Production Notes
+
+### Network connectivity between clusters
+
+The east-west gateways communicate over the internet (or via Transit Gateway if you prefer private routing). The NLBs created by the aws-load-balancer-controller are internal by default in this configuration (`aws-load-balancer-scheme: internal`). For cross-region connectivity you need either:
+
+- AWS Transit Gateway connecting both VPCs
+- VPC peering (if CIDR ranges don't overlap)
+- Or change `aws-load-balancer-scheme: internet-facing` and restrict with security groups
+
+### Karpenter node consolidation for game servers
 
 ```yaml
 disruption:
   consolidateAfter: 15m
-  consolidationPolicy: WhenEmpty  # Only consolidate nodes with no pods
+  consolidationPolicy: WhenEmpty  # Only drain nodes with zero pods
 template:
   spec:
-    terminationGracePeriod: 15m   # Wait for game sessions to finish
-    expireAfter: Never            # Don't force-expire running game servers
+    terminationGracePeriod: 15m   # Respect running game sessions
+    expireAfter: Never            # Don't force-cycle running nodes
 ```
 
-The `taintKey` pattern ensures game server pods only land on game server nodes (and vice versa):
+`WhenEmpty` is critical — `WhenUnderutilized` would evict game server pods mid-session.
 
-```yaml
-taints:
-- effect: NoExecute
-  key: agones.dev/agones-gameservers-amd64
-  value: "true"
-```
+### cert-manager CA rotation
 
-### Agones Topology Spread Constraints
-
-The allocator replicas spread across AZs for HA:
-
-```yaml
-topologySpreadConstraints:
-- labelSelector:
-    matchLabels:
-      multicluster.agones.dev/role: allocator
-  maxSkew: 1
-  topologyKey: topology.kubernetes.io/zone
-  whenUnsatisfiable: DoNotSchedule
-```
-
-### Istio Outlier Detection
-
-The DestinationRule includes outlier detection for remote regions — if an allocator starts failing, Istio temporarily ejects it from the load balancing pool:
-
-```yaml
-outlierDetection:
-  consecutiveErrors: 5
-  interval: 30s
-  baseEjectionTime: 30s
-```
-
-### Certificate Rotation
-
-All certificates are managed by cert-manager with 10-year validity and 10-hour renewal windows. The Agones webhook certificates are auto-injected via cert-manager annotations, so rotation is zero-touch.
-
-### Istiod High Availability
-
-The istiod deployment has HPA and topology spread constraints to ensure it survives an AZ outage without impacting the data plane:
-
-```yaml
-pilot:
-  autoscaleEnabled: true
-  autoscaleMin: 2   # Floor of 2 + AZ spread: drain-safe with PDB minAvailable=1
-  autoscaleMax: 5
-```
-
----
-
-## How This Compares to the Alternative
-
-| Approach | Management overhead | Matchmaker complexity | Cross-region latency |
-|---|---|---|---|
-| One NLB per cluster | High (N certs, N endpoints) | High (knows all regions) | Optimal if client-side routing |
-| Agones multicluster (no Istio) | Medium (cert sync automation needed) | Low | Optimal |
-| **Agones + Istio (this repo)** | **Low (Crossplane manages everything)** | **Very low (one endpoint)** | **Optimal + automatic failover** |
-
-The Istio approach adds a small data-plane hop (through the east-west gateway) compared to direct NLB, but the operational benefits and the automatic retry/failover behavior more than compensate.
-
----
-
-## Repository Structure
-
-```
-.
-├── README.md                          # This article
-├── packages/
-│   ├── eks-cluster/
-│   │   ├── crossplane.yaml            # Package metadata
-│   │   ├── definition.yaml            # XRD: KubernetesCluster API
-│   │   └── aws.yaml                   # Composition: EKS + IAM + addons + Karpenter
-│   ├── agones/
-│   │   ├── crossplane.yaml
-│   │   ├── definition.yaml            # XRD: AgonesCluster API
-│   │   └── aws.yaml                   # Composition: Agones HA + NodePools
-│   └── istio/
-│       ├── crossplane.yaml
-│       ├── definition.yaml            # XRD: Istio API
-│       └── aws.yaml                   # Composition: istiod + east-west GW + mesh routing
-└── examples/
-    ├── cluster-us-east-1.yaml         # EKS claim: us-east-1
-    ├── cluster-eu-west-1.yaml         # EKS claim: eu-west-1
-    ├── agones-claim-us-east-1.yaml    # Agones claim: us-east-1
-    └── istio-claim-us-east-1.yaml     # Istio claim: us-east-1
-```
-
----
-
-## Key Takeaways
-
-1. **Istio's `mesh-region` header routing** eliminates the need for the matchmaker to know cluster topology. One endpoint, any region.
-
-2. **`retryRemoteLocalities: true`** gives you automatic cross-region failover without any application code changes.
-
-3. **The `portName: http-` convention** is the critical bridge between Agones (which speaks gRPC/HTTP2) and Istio's traffic management features.
-
-4. **Crossplane Compositions** handle the operational complexity: remote secrets, CA certificate distribution, and routing rule generation are all driven by simple YAML parameters.
-
-5. **Karpenter's `WhenEmpty` + `terminationGracePeriod`** is the right combination for game server workloads — you get fast scale-up, economical scale-down, and respect for running game sessions.
+The Istio root CA has a 10-year validity with 30-day renewal notice. cert-manager handles rotation automatically. When the CA rotates, istiod picks up the new `cacerts` secret on the next reconciliation cycle — workload certificates are re-issued transparently.
 
 ---
 
@@ -656,9 +497,6 @@ The Istio approach adds a small data-plane hop (through the east-west gateway) c
 
 - [Agones Multi-cluster Allocation](https://agones.dev/site/docs/guides/multi-cluster-allocation/)
 - [Istio Multi-Primary on Different Networks](https://istio.io/latest/docs/setup/install/multicluster/multi-primary_multi-network/)
-- [Crossplane Compositions](https://docs.crossplane.io/latest/concepts/compositions/)
-- [Karpenter NodePools](https://karpenter.sh/docs/concepts/nodepools/)
-
----
-
-*The packages in this repository are stripped-down, demo-ready versions. They cover the core mechanics — EKS provisioning, Agones HA, and Istio multi-cluster mesh — without organization-specific configuration. Fork, adapt the `awsAccountNumber` and VPC parameters, and you have a working foundation.*
+- [Istio Plugin CA Certs](https://istio.io/latest/docs/tasks/security/cert-management/plugin-ca-cert/)
+- [Crossplane Nested Composite Resources](https://docs.crossplane.io/latest/concepts/compositions/#nested-composite-resources)
+- [Karpenter Disruption](https://karpenter.sh/docs/concepts/disruption/)

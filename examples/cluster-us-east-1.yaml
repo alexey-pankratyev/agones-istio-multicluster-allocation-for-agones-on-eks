@@ -11,39 +11,74 @@ spec:
     awsAccountNumber: "123456789012"
     vpcId: vpc-0123456789abcdef0
     subnetIds:
-    - subnet-aaa111
-    - subnet-bbb222
-    - subnet-ccc333
-    - subnet-ddd444
+    - subnet-aaa111   # private us-east-1a
+    - subnet-bbb222   # private us-east-1b
+    - subnet-ccc333   # public  us-east-1a
+    - subnet-ddd444   # public  us-east-1b
     subnetPrivateIds:
     - subnet-aaa111
     - subnet-bbb222
     subnetPublicIds:
     - subnet-ccc333
     - subnet-ddd444
+    systemNodeSize: medium
+    systemMinNodeCount: 2
+    systemMaxNodeCount: 4
     karpenterVersion: "1.4.0"
     corednsAddonVersion: v1.11.4-eksbuild.2
     kubeproxyAddonVersion: v1.32.0-eksbuild.2
     vpccniAddonVersion: v1.19.3-eksbuild.1
     ebsCsiDriverAddonVersion: v1.41.0-eksbuild.1
-    systemNodeSize: medium
-    systemMinNodeCount: 2
-    systemMaxNodeCount: 4
-    # Enable Istio with multicluster connecting to eu-west-1
+
     istio:
       enabled: true
       version: "1.26.2"
       meshID: demo-mesh
+      # primary: true — this cluster creates the shared Istio root CA in cert-manager
+      # on the management cluster. Set to false on all other clusters in the mesh.
+      primary: true
       multicluster:
         enabled: true
         rules:
         - clusterName: gameserver-eu-west-1
           region: eu-west-1
-    # Enable Agones
+          agonesNamespace: agones-system
+          istioNamespace: istio-system
+
     agones:
       enabled: true
       version: "1.48.0"
+      vpcSubnetSelectorPrivate: "us-east-1a"
+      vpcSubnetSelectorPublic: "us-east-1a-public"
+      oidc: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
       replicas:
         allocator: 3
         controller: 3
         extensions: 2
+      karpenterNodePools:
+      - nodePoolName: gameservers-amd64
+        weight: "100"
+        nodeclass:
+          volumeEnabled: true
+          volumeSize: "30Gi"
+          iops: "3000"
+          throughput: "125"
+          amiFamily: Bottlerocket
+          amiAlias: bottlerocket@1.57.0
+          deviceName: "/dev/xvdb"
+        limits:
+          cpu: "200"
+          memory: "800Gi"
+        capacityType:
+        - spot
+        - on-demand
+        instanceCategory:
+        - c
+        - m
+        instanceCpu:
+        - "4"
+        - "8"
+        - "16"
+        instanceArch:
+        - amd64
+        taintKey: agones.dev/agones-gameservers-amd64

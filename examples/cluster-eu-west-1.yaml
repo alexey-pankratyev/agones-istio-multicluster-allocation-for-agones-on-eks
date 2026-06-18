@@ -11,37 +11,74 @@ spec:
     awsAccountNumber: "123456789012"
     vpcId: vpc-0fedcba9876543210
     subnetIds:
-    - subnet-eee555
-    - subnet-fff666
-    - subnet-ggg777
-    - subnet-hhh888
+    - subnet-eee555   # private eu-west-1a
+    - subnet-fff666   # private eu-west-1b
+    - subnet-ggg777   # public  eu-west-1a
+    - subnet-hhh888   # public  eu-west-1b
     subnetPrivateIds:
     - subnet-eee555
     - subnet-fff666
     subnetPublicIds:
     - subnet-ggg777
     - subnet-hhh888
+    systemNodeSize: medium
+    systemMinNodeCount: 2
+    systemMaxNodeCount: 4
     karpenterVersion: "1.4.0"
     corednsAddonVersion: v1.11.4-eksbuild.2
     kubeproxyAddonVersion: v1.32.0-eksbuild.2
     vpccniAddonVersion: v1.19.3-eksbuild.1
     ebsCsiDriverAddonVersion: v1.41.0-eksbuild.1
-    systemNodeSize: medium
-    systemMinNodeCount: 2
-    systemMaxNodeCount: 4
+
     istio:
       enabled: true
       version: "1.26.2"
       meshID: demo-mesh
+      # primary: false — this cluster receives the shared CA from the management cluster.
+      # The CA was created by the primary cluster (us-east-1).
+      primary: false
       multicluster:
         enabled: true
         rules:
         - clusterName: gameserver-us-east-1
           region: us-east-1
+          agonesNamespace: agones-system
+          istioNamespace: istio-system
+
     agones:
       enabled: true
       version: "1.48.0"
+      vpcSubnetSelectorPrivate: "eu-west-1a"
+      vpcSubnetSelectorPublic: "eu-west-1a-public"
+      oidc: "oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLEF649E5844F64FE2B82EXAMPLE"
       replicas:
         allocator: 3
         controller: 3
         extensions: 2
+      karpenterNodePools:
+      - nodePoolName: gameservers-amd64
+        weight: "100"
+        nodeclass:
+          volumeEnabled: true
+          volumeSize: "30Gi"
+          iops: "3000"
+          throughput: "125"
+          amiFamily: Bottlerocket
+          amiAlias: bottlerocket@1.57.0
+          deviceName: "/dev/xvdb"
+        limits:
+          cpu: "200"
+          memory: "800Gi"
+        capacityType:
+        - spot
+        - on-demand
+        instanceCategory:
+        - c
+        - m
+        instanceCpu:
+        - "4"
+        - "8"
+        - "16"
+        instanceArch:
+        - amd64
+        taintKey: agones.dev/agones-gameservers-amd64

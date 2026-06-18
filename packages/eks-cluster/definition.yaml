@@ -40,25 +40,25 @@ spec:
                     description: VPC Id
                     type: string
                   subnetIds:
-                    description: All subnet IDs (public + private)
+                    description: All subnet IDs (public + private).
                     items:
                       type: string
                     type: array
                   subnetPrivateIds:
-                    description: Private subnet IDs for node groups
+                    description: Private subnet IDs for system/Istio node groups.
                     items:
                       type: string
                     type: array
                   subnetPublicIds:
-                    description: Public subnet IDs
+                    description: Public subnet IDs for game server node groups.
                     items:
                       type: string
                     type: array
                   awsAccountNumber:
-                    description: AWS account number
+                    description: AWS account number.
                     type: string
                   systemNodeSize:
-                    description: System node instance size
+                    description: System node instance size profile.
                     type: string
                     enum:
                     - small    # t3a.medium
@@ -83,8 +83,12 @@ spec:
                     type: string
                   ebsCsiDriverAddonVersion:
                     type: string
+
                   istio:
-                    description: Istio installation parameters
+                    description: |
+                      Istio service mesh configuration.
+                      When enabled, the Composition installs istiod and the east-west gateway
+                      via the istio Crossplane package, then wires up multicluster routing.
                     type: object
                     properties:
                       enabled:
@@ -94,7 +98,18 @@ spec:
                         type: string
                         default: "1.26.2"
                       meshID:
+                        description: |
+                          Shared mesh ID. Must be identical on every cluster in the mesh.
                         type: string
+                      primary:
+                        description: |
+                          Mark this cluster as the primary (root CA owner).
+                          When true the Composition creates the shared Istio root CA
+                          via cert-manager. All other clusters must set primary: false
+                          and will receive the CA via Crossplane namespace references.
+                          Exactly one cluster per mesh should be primary: true.
+                        type: boolean
+                        default: false
                       multicluster:
                         type: object
                         properties:
@@ -102,6 +117,10 @@ spec:
                             type: boolean
                             default: false
                           rules:
+                            description: |
+                              List of peer clusters to connect via east-west gateway.
+                              Each entry generates remote-secret copy and routing rules
+                              (DestinationRule + VirtualService) for Agones allocator.
                             type: array
                             items:
                               type: object
@@ -118,8 +137,16 @@ spec:
                                   default: istio-system
                                 gatewayServiceName:
                                   type: string
+                    required:
+                    - version
+                    - meshID
+
                   agones:
-                    description: Agones installation parameters
+                    description: |
+                      Agones game server framework configuration.
+                      When enabled, the Composition installs Agones via the agones
+                      Crossplane package with HA allocator and Karpenter NodePools
+                      for dedicated game server nodes.
                     type: object
                     properties:
                       enabled:
@@ -140,28 +167,93 @@ spec:
                           extensions:
                             type: integer
                             default: 2
-                  multicluster:
-                    type: object
-                    properties:
-                      enabled:
-                        type: boolean
-                        default: false
-                      multiclusterPolicies:
+                      vpcSubnetSelectorPublic:
+                        description: |
+                          Karpenter subnet selector tag for game server nodes.
+                          Game server pods need public IPs for UDP reachability.
+                        type: string
+                      vpcSubnetSelectorPrivate:
+                        description: Karpenter subnet selector tag for Agones system nodes.
+                        type: string
+                      oidc:
+                        description: |
+                          OIDC provider URL (without https://) for IRSA.
+                          Used to create the agones-sdk ServiceAccount IAM role.
+                        type: string
+                      karpenterNodePools:
+                        description: Karpenter NodePools for game server workloads.
                         type: array
                         items:
                           type: object
                           properties:
-                            clusterName:
+                            nodePoolName:
                               type: string
-                            priority:
-                              type: integer
                             weight:
-                              type: integer
-                            region:
                               type: string
-                            namespace:
+                              default: "50"
+                            nodeclass:
+                              type: object
+                              properties:
+                                volumeEnabled:
+                                  type: boolean
+                                volumeSize:
+                                  type: string
+                                  default: "30Gi"
+                                iops:
+                                  type: string
+                                  default: "3000"
+                                throughput:
+                                  type: string
+                                  default: "125"
+                                amiFamily:
+                                  type: string
+                                  default: Bottlerocket
+                                amiAlias:
+                                  type: string
+                                  default: bottlerocket@1.57.0
+                                deviceName:
+                                  type: string
+                                  default: "/dev/xvdb"
+                              required:
+                              - volumeEnabled
+                            limits:
+                              type: object
+                              properties:
+                                cpu:
+                                  type: string
+                                memory:
+                                  type: string
+                              required:
+                              - cpu
+                              - memory
+                            capacityType:
+                              type: array
+                              items:
+                                type: string
+                            instanceCategory:
+                              type: array
+                              items:
+                                type: string
+                              default: []
+                            instanceCpu:
+                              type: array
+                              items:
+                                type: string
+                              default: []
+                            instanceArch:
+                              type: array
+                              items:
+                                type: string
+                            taintKey:
                               type: string
-                              default: agones-gameservers
+                          required:
+                          - nodeclass
+                          - nodePoolName
+                          - limits
+                          - capacityType
+                          - instanceArch
+                          - taintKey
+
                 required:
                 - region
                 - vpcId
