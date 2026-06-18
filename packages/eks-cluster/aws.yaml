@@ -1,0 +1,310 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  labels:
+    cluster: eks
+    provider: aws
+  annotations:
+    version: v0.1.0
+  name: xkubernetes-aws
+spec:
+  compositeTypeRef:
+    apiVersion: demo.crossplane.io/v1alpha1
+    kind: XKubernetesCluster
+  mode: Pipeline
+  pipeline:
+  - step: CreateEKSCluster
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          {{- $spec := .observed.composite.resource.spec }}
+          {{- $id := $spec.id }}
+          {{- $params := $spec.parameters }}
+          ---
+          # EKS Cluster IAM Role
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Role
+          metadata:
+            name: {{ $id }}-controlplane
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-controlplane
+          spec:
+            forProvider:
+              assumeRolePolicy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": ["eks.amazonaws.com"]},
+                    "Action": ["sts:AssumeRole","sts:TagSession"]
+                  }]
+                }
+          ---
+          # Node IAM Role
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Role
+          metadata:
+            name: {{ $id }}-nodegroup
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-nodegroup
+          spec:
+            forProvider:
+              assumeRolePolicy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Service": ["ec2.amazonaws.com"]},
+                    "Action": ["sts:AssumeRole"]
+                  }]
+                }
+          ---
+          # EKS Cluster
+          apiVersion: eks.aws.upbound.io/v1beta2
+          kind: Cluster
+          metadata:
+            name: {{ $id }}
+            labels:
+              resource: cluster
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-ekscluster
+          spec:
+            deletionPolicy: Orphan
+            forProvider:
+              region: {{ $params.region }}
+              version: {{ $params.version }}
+              accessConfig:
+                authenticationMode: API_AND_CONFIG_MAP
+                bootstrapClusterCreatorAdminPermissions: true
+              vpcConfig:
+                subnetIds: {{ $params.subnetIds | toJson }}
+                endpointPrivateAccess: true
+                endpointPublicAccess: false
+              roleArnSelector:
+                matchControllerRef: true
+                matchLabels:
+                  role: {{ $id }}-controlplane
+          ---
+          # System Node Group
+          apiVersion: eks.aws.upbound.io/v1beta2
+          kind: NodeGroup
+          metadata:
+            name: {{ $id }}-system-ng
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-system-ng
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+              nodeRoleArnSelector:
+                matchControllerRef: true
+                matchLabels:
+                  role: {{ $id }}-nodegroup
+              subnetIds: {{ $params.subnetPrivateIds | toJson }}
+              capacityType: ON_DEMAND
+              scalingConfig:
+                minSize: {{ $params.systemMinNodeCount }}
+                maxSize: {{ $params.systemMaxNodeCount }}
+                desiredSize: {{ $params.systemMinNodeCount }}
+              taint:
+              - effect: NO_SCHEDULE
+                key: CriticalAddonsOnly
+          ---
+          # Security group rule: game server UDP ports
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: SecurityGroupRule
+          metadata:
+            name: {{ $id }}-sgr-gameserver-udp
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-sgr-gameserver-udp
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              cidrBlocks:
+              - 0.0.0.0/0
+              fromPort: 7000
+              toPort: 8000
+              protocol: udp
+              type: ingress
+              securityGroupIdSelector:
+                matchControllerRef: true
+          ---
+          # CoreDNS Addon
+          apiVersion: eks.aws.upbound.io/v1beta1
+          kind: Addon
+          metadata:
+            name: {{ $id }}-coredns
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-coredns
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+              addonName: coredns
+              addonVersion: {{ $params.corednsAddonVersion }}
+          ---
+          # VPC CNI Addon
+          apiVersion: eks.aws.upbound.io/v1beta1
+          kind: Addon
+          metadata:
+            name: {{ $id }}-vpccni
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-vpccni
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+              addonName: vpc-cni
+              addonVersion: {{ $params.vpccniAddonVersion }}
+          ---
+          # Kube Proxy Addon
+          apiVersion: eks.aws.upbound.io/v1beta1
+          kind: Addon
+          metadata:
+            name: {{ $id }}-kubeproxy
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-kubeproxy
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+              addonName: kube-proxy
+              addonVersion: {{ $params.kubeproxyAddonVersion }}
+          ---
+          # EBS CSI Driver Addon
+          apiVersion: eks.aws.upbound.io/v1beta1
+          kind: Addon
+          metadata:
+            name: {{ $id }}-ebs-csi-driver
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-ebs-csi-driver
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+              addonName: aws-ebs-csi-driver
+              addonVersion: {{ $params.ebsCsiDriverAddonVersion }}
+          ---
+          # Cluster Auth (write kubeconfig to secret)
+          apiVersion: eks.aws.upbound.io/v1beta1
+          kind: ClusterAuth
+          metadata:
+            name: {{ $id }}-clusterauth
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-clusterauth
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              clusterNameSelector:
+                matchControllerRef: true
+            writeConnectionSecretToRef:
+              name: {{ $id }}-ekscluster
+              namespace: crossplane-system
+          ---
+          # Kubernetes ProviderConfig
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: ProviderConfig
+          metadata:
+            name: {{ $id }}-kubernetes
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-providerconfig-k8s
+          spec:
+            credentials:
+              source: Secret
+              secretRef:
+                name: {{ $id }}-ekscluster
+                namespace: crossplane-system
+                key: kubeconfig
+          ---
+          # Helm ProviderConfig
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: ProviderConfig
+          metadata:
+            name: {{ $id }}-helm
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-providerconfig-helm
+          spec:
+            credentials:
+              source: Secret
+              secretRef:
+                name: {{ $id }}-ekscluster
+                namespace: crossplane-system
+                key: kubeconfig
+          ---
+          # Karpenter Helm Release
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-karpenter
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-karpenter
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: karpenter
+                repository: oci://public.ecr.aws/karpenter
+                version: {{ $params.karpenterVersion }}
+              namespace: kube-system
+              values:
+                settings:
+                  clusterName: {{ $id }}
+                tolerations:
+                - key: CriticalAddonsOnly
+                  operator: Exists
+          ---
+          # cert-manager Helm Release (required by Agones for webhook certs)
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-cert-manager
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-cert-manager
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: cert-manager
+                repository: https://charts.jetstack.io
+                version: "v1.17.2"
+              namespace: cert-manager
+              values:
+                installCRDs: true
+                tolerations:
+                - key: CriticalAddonsOnly
+                  operator: Exists
+          ---
+          # Self-signed ClusterIssuer for Agones webhook certs
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ $id }}-selfsigned-issuer
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-selfsigned-issuer
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: cert-manager.io/v1
+                kind: ClusterIssuer
+                metadata:
+                  name: selfsigned
+                spec:
+                  selfSigned: {}
+
+  - step: automaticallyDetectReadyComposedResources
+    functionRef:
+      name: function-auto-ready

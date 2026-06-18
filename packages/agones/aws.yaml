@@ -1,0 +1,449 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  labels:
+    cluster: agonescluster
+    provider: aws
+  annotations:
+    version: v0.1.0
+  name: xagones-aws
+spec:
+  compositeTypeRef:
+    apiVersion: demo.crossplane.io/v1alpha1
+    kind: XAgonesCluster
+  mode: Pipeline
+  pipeline:
+  - step: InstallAgonesGoTemplate
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          {{- $spec := .observed.composite.resource.spec }}
+          {{- $id := $spec.id }}
+          {{- $params := $spec.parameters }}
+          {{- $istioEnabled := and $params.istio (index $params.istio "enabled") }}
+          ---
+          # Agones system namespace with Istio labels
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-agones-system-namespace
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-agones-system-namespace
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            managementPolicies:
+            - Observe
+            - Create
+            - Update
+            deletionPolicy: Orphan
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: agones-system
+                  labels:
+                    istio-injection: enabled
+                    # Required for Istio multi-network/multicluster
+                    topology.istio.io/network: {{ $id }}-istio-network
+          ---
+          # Agones gameservers namespace
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-ns-agones-gameservers
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-ns-agones-gameservers
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            managementPolicies:
+            - Observe
+            - Create
+            - Update
+            deletionPolicy: Orphan
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: agones-gameservers
+          ---
+          # Self-signed certificate for Agones controller webhook
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ $id }}-agones-cert
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-agones-cert
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: cert-manager.io/v1
+                kind: Certificate
+                metadata:
+                  name: {{ $id }}-agones-cert
+                  namespace: agones-system
+                spec:
+                  dnsNames:
+                  - agones-controller-service.agones-system.svc.cluster.local
+                  - agones-controller-service.agones-system.svc
+                  duration: 87600h
+                  issuerRef:
+                    kind: ClusterIssuer
+                    name: selfsigned
+                  renewBefore: 10h
+                  secretName: {{ $id }}-agones-cert
+          ---
+          # Agones allocator server TLS certificate
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ $id }}-agones-allocator-server-cert
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-agones-allocator-server-cert
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: cert-manager.io/v1
+                kind: Certificate
+                metadata:
+                  name: {{ $id }}-agones-allocator-server-cert
+                  namespace: agones-system
+                spec:
+                  dnsNames:
+                  - "*.elb.{{ $params.region }}.amazonaws.com"
+                  - agones-allocator.agones-system.svc.cluster.local
+                  - agones-allocator.agones-system.svc
+                  secretName: {{ $id }}-agones-allocator-server-cert
+                  commonName: agones-allocator
+                  duration: 87600h
+                  renewBefore: 10h
+                  issuerRef:
+                    kind: ClusterIssuer
+                    name: selfsigned
+          ---
+          # Agones allocator client TLS certificate (for mTLS allocation calls)
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ $id }}-agones-allocator-client-cert
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-agones-allocator-client-cert
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: cert-manager.io/v1
+                kind: Certificate
+                metadata:
+                  name: {{ $id }}-agones-allocator-client-cert
+                  namespace: agones-system
+                spec:
+                  commonName: allocation-ca
+                  duration: 87600h
+                  issuerRef:
+                    kind: ClusterIssuer
+                    name: selfsigned
+                  renewBefore: 10h
+                  secretName: {{ $id }}-agones-allocator-client-cert
+          ---
+          # Agones Helm Release
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-agones
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-agones
+          spec:
+            rollbackLimit: 15
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: agones
+                repository: https://agones.dev/chart/stable
+                version: {{ $params.version }}
+              namespace: agones-system
+              skipCreateNamespace: true
+              set:
+              {{- if not $istioEnabled }}
+              # Without Istio: configure TLS directly on the allocator
+              - name: agones.allocator.tlsCert
+                valueFrom:
+                  secretKeyRef:
+                    key: tls.crt
+                    name: {{ $id }}-agones-allocator-server-cert
+                    namespace: agones-system
+              - name: agones.allocator.tlsKey
+                valueFrom:
+                  secretKeyRef:
+                    key: tls.key
+                    name: {{ $id }}-agones-allocator-server-cert
+                    namespace: agones-system
+              - name: agones.allocator.clientCAs.default\.crt
+                valueFrom:
+                  secretKeyRef:
+                    key: tls.crt
+                    name: {{ $id }}-agones-allocator-client-cert
+                    namespace: agones-system
+              {{- else }}
+              # With Istio: disable allocator TLS, Istio mTLS handles it
+              - name: agones.allocator.disableTLS
+                value: "true"
+              {{- end }}
+              values:
+                agones:
+                  allocator:
+                    replicas: {{ $params.replicas.allocator }}
+                    generateClientTLS: false
+                    generateTLS: false
+                    apiServerQPS: 400
+                    apiServerQPSBurst: 500
+                    remoteAllocationTimeout: 5s
+                    totalRemoteAllocationTimeout: 20s
+                    {{- if $istioEnabled }}
+                    labels:
+                      mesh-region: {{ $params.region }}
+                    annotations:
+                      sidecar.istio.io/inject: "true"
+                    {{- end }}
+                    resources:
+                      requests:
+                        cpu: "500m"
+                        memory: "256Mi"
+                    service:
+                      {{- if $istioEnabled }}
+                      # Istio mode: ClusterIP — east-west gateway handles cross-cluster routing
+                      annotations:
+                        blitz.agones.dev/allocator-host: agones-allocator.agones-system.svc.cluster.local
+                      serviceType: ClusterIP
+                      http:
+                        enabled: true
+                        port: 443
+                        portName: http-rest
+                        targetPort: 8443
+                      grpc:
+                        enabled: true
+                        port: 8443
+                        portName: grpc-alloc
+                        targetPort: 8443
+                      {{- else }}
+                      # Non-Istio mode: NLB with direct mTLS
+                      annotations:
+                        service.beta.kubernetes.io/aws-load-balancer-type: external
+                        service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+                        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+                      grpc:
+                        enabled: true
+                        port: 8443
+                        portName: grpc
+                        targetPort: 8443
+                      loadBalancerSourceRanges:
+                      - "10.0.0.0/8"
+                      {{- end }}
+                    pdb:
+                      enabled: true
+                    tolerations:
+                    - effect: NoExecute
+                      key: agones.dev/agones-system
+                      operator: Equal
+                      value: "true"
+                  controller:
+                    replicas: {{ $params.replicas.controller }}
+                    allocationApiService:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    customCertSecretPath:
+                    - key: ca.crt
+                      path: ca.crt
+                    - key: tls.crt
+                      path: server.crt
+                    - key: tls.key
+                      path: server.key
+                    disableSecret: true
+                    generateTLS: false
+                    mutatingWebhook:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    validatingWebhook:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    tolerations:
+                    - effect: NoExecute
+                      key: agones.dev/agones-system
+                      operator: Equal
+                      value: "true"
+                  extensions:
+                    replicas: {{ $params.replicas.extensions }}
+                    allocationApiService:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    customCertSecretPath:
+                    - key: ca.crt
+                      path: ca.crt
+                    - key: tls.crt
+                      path: server.crt
+                    - key: tls.key
+                      path: server.key
+                    disableSecret: true
+                    mutatingWebhook:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    validatingWebhook:
+                      disableCaBundle: true
+                      annotations:
+                        cert-manager.io/inject-ca-from: agones-system/{{ $id }}-agones-cert
+                    tolerations:
+                    - effect: NoExecute
+                      key: agones.dev/agones-system
+                      operator: Equal
+                      value: "true"
+                  featureGates: PlayerTracking=true
+                  metrics:
+                    prometheusEnabled: true
+                    prometheusServiceDiscovery: false
+                  ping:
+                    install: true
+                    http:
+                      expose: true
+                    udp:
+                      expose: true
+                gameservers:
+                  minPort: 7000
+                  maxPort: 8000
+                  namespaces:
+                  - agones-gameservers
+          {{- if (not (empty $params.karpenterNodePools)) }}
+          {{- range $i := $params.karpenterNodePools }}
+          ---
+          # Karpenter NodePool for game server workloads: {{ $i.nodePoolName }}
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-{{ $i.nodePoolName }}-nodepool
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-{{ $i.nodePoolName }}-nodepool
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: karpenter.sh/v1
+                kind: NodePool
+                metadata:
+                  name: {{ $i.nodePoolName }}
+                spec:
+                  weight: {{ $i.weight }}
+                  limits:
+                    {{- range $key, $value := $i.limits }}
+                    {{ $key }}: "{{ $value }}"
+                    {{- end }}
+                  disruption:
+                    consolidateAfter: 15m
+                    consolidationPolicy: WhenEmpty
+                  template:
+                    spec:
+                      expireAfter: Never
+                      terminationGracePeriod: 15m
+                      nodeClassRef:
+                        group: karpenter.k8s.aws
+                        kind: EC2NodeClass
+                        name: {{ $i.nodePoolName }}
+                      requirements:
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values:
+                        {{- range $capType := $i.capacityType }}
+                        - "{{ toString $capType }}"
+                        {{- end }}
+                      {{- if (not (empty $i.instanceCategory)) }}
+                      - key: karpenter.k8s.aws/instance-category
+                        operator: In
+                        values:
+                        {{- range $inType := $i.instanceCategory }}
+                        - "{{ toString $inType }}"
+                        {{- end }}
+                      {{- end }}
+                      {{- if (not (empty $i.instanceCpu)) }}
+                      - key: karpenter.k8s.aws/instance-cpu
+                        operator: In
+                        values:
+                        {{- range $inCpu := $i.instanceCpu }}
+                        - "{{ toString $inCpu }}"
+                        {{- end }}
+                      {{- end }}
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                        {{- range $inArch := $i.instanceArch }}
+                        - "{{ toString $inArch }}"
+                        {{- end }}
+                      - key: kubernetes.io/os
+                        operator: In
+                        values:
+                        - linux
+                      taints:
+                      - effect: NoExecute
+                        value: "true"
+                        key: "{{ toString $i.taintKey }}"
+          ---
+          # EC2NodeClass for game server pool: {{ $i.nodePoolName }}
+          apiVersion: kubernetes.crossplane.io/v1alpha1
+          kind: Object
+          metadata:
+            name: {{ $id }}-{{ $i.nodePoolName }}-ec2nodeclass
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-{{ $i.nodePoolName }}-ec2nodeclass
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: karpenter.k8s.aws/v1
+                kind: EC2NodeClass
+                metadata:
+                  name: {{ $i.nodePoolName }}
+                spec:
+                  amiFamily: {{ $i.nodeclass.amiFamily }}
+                  amiSelectorTerms:
+                  - alias: {{ $i.nodeclass.amiAlias }}
+                  role: {{ $id }}-nodegroup
+                  subnetSelectorTerms:
+                  - tags:
+                      karpenter.sh/subnetzone: {{ $params.vpc_subnet_selector_public }}
+                  securityGroupSelectorTerms:
+                  - tags:
+                      aws:eks:cluster-name: {{ $id }}
+                  {{- if $i.nodeclass.volumeEnabled }}
+                  blockDeviceMappings:
+                  - deviceName: {{ $i.nodeclass.deviceName }}
+                    ebs:
+                      deleteOnTermination: true
+                      volumeType: gp3
+                      volumeSize: {{ $i.nodeclass.volumeSize }}
+                      iops: {{ $i.nodeclass.iops }}
+                      throughput: {{ $i.nodeclass.throughput }}
+                  {{- end }}
+          {{- end }}
+          {{- end }}
+
+  - step: automaticallyDetectReadyComposedResources
+    functionRef:
+      name: function-auto-ready

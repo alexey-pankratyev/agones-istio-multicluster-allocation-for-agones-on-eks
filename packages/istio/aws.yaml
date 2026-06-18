@@ -1,0 +1,723 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  labels:
+    app: istio
+    provider: aws
+  annotations:
+    version: v0.1.0
+  name: xistio-aws
+spec:
+  compositeTypeRef:
+    apiVersion: demo.crossplane.io/v1alpha1
+    kind: XIstio
+  mode: Pipeline
+  pipeline:
+  - step: CreateIstioResources
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          {{- $spec := .observed.composite.resource.spec }}
+          {{- $params := get $spec "parameters" | default dict }}
+          {{- $id := get $spec "id" | default "" }}
+          {{- $multicluster := get $params "multicluster" | default dict }}
+          ---
+          # istio-system namespace with network label
+          # topology.istio.io/network is critical for multi-network multicluster:
+          # it tells istiod which network this cluster belongs to.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-system-ns
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-system-ns
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            managementPolicies:
+            - Observe
+            - Create
+            - Update
+            deletionPolicy: Orphan
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    topology.istio.io/network: {{ $id }}-istio-network
+          ---
+          # Shared Istio CA secret (cacerts) — enables cross-cluster mTLS with a common root CA.
+          # Crossplane copies this from a cert-manager-managed secret in the management cluster.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-ca-secret
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ca-secret
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: istio-root-ca
+                  namespace: {{ $params.namespace | default "istio-system" }}
+            references:
+            - patchesFrom:
+                name: istio-ca
+                namespace: cert-manager
+                apiVersion: v1
+                kind: Secret
+                fieldPath: data[ca.crt]
+              toFieldPath: data[ca.crt]
+            - patchesFrom:
+                name: istio-ca
+                namespace: cert-manager
+                apiVersion: v1
+                kind: Secret
+                fieldPath: data[tls.crt]
+              toFieldPath: data[tls.crt]
+            - patchesFrom:
+                name: istio-ca
+                namespace: cert-manager
+                apiVersion: v1
+                kind: Secret
+                fieldPath: data[tls.key]
+              toFieldPath: data[tls.key]
+          {{- $istioRootCA := get .observed.resources (print $id "-istio-ca-secret") | default dict }}
+          {{- $rootCertB64 := "" }}
+          {{- $caCertB64 := "" }}
+          {{- $caKeyB64 := "" }}
+          {{- if and $istioRootCA $istioRootCA.resource $istioRootCA.resource.status $istioRootCA.resource.status.atProvider $istioRootCA.resource.status.atProvider.manifest $istioRootCA.resource.status.atProvider.manifest.data }}
+            {{- $rootCertB64 = (index $istioRootCA.resource.status.atProvider.manifest.data "ca.crt" | default "") }}
+            {{- $caCertB64 = (index $istioRootCA.resource.status.atProvider.manifest.data "tls.crt" | default "") }}
+            {{- $caKeyB64 = (index $istioRootCA.resource.status.atProvider.manifest.data "tls.key" | default "") }}
+          {{- end }}
+          {{- $certChainB64 := "" }}
+          {{- if and $caCertB64 $rootCertB64 }}
+            {{- $caCertString := b64dec $caCertB64 }}
+            {{- $rootCertString := b64dec $rootCertB64 }}
+            {{- if eq $caCertString $rootCertString }}
+              {{- $certChainB64 = b64enc $rootCertString }}
+            {{- else }}
+              {{- $certChainB64 = b64enc (printf "%s\n%s" $caCertString $rootCertString) }}
+            {{- end }}
+          {{- end }}
+          ---
+          # cacerts secret consumed by istiod for signing workload certificates.
+          # All clusters must share the same root CA for cross-cluster mTLS to work.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-secret-cacert
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-secret-cacert
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            managementPolicies:
+            - Observe
+            - Create
+            - Update
+            deletionPolicy: Orphan
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: cacerts
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                type: Opaque
+                data:
+                  root-cert.pem: {{ $rootCertB64 | quote }}
+                  ca-cert.pem: {{ $caCertB64 | quote }}
+                  ca-key.pem: {{ $caKeyB64 | quote }}
+                  cert-chain.pem: {{ $certChainB64 | quote }}
+          ---
+          # Karpenter NodePool for Istio control-plane pods
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-system-nodepool
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-system-nodepool
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: karpenter.sh/v1
+                kind: NodePool
+                metadata:
+                  name: istio-system
+                spec:
+                  disruption:
+                    consolidateAfter: 10m
+                    consolidationPolicy: WhenEmpty
+                  limits:
+                    cpu: "50"
+                    memory: 200Gi
+                  template:
+                    spec:
+                      expireAfter: Never
+                      nodeClassRef:
+                        group: karpenter.k8s.aws
+                        kind: EC2NodeClass
+                        name: istio-system
+                      requirements:
+                      - key: karpenter.sh/capacity-type
+                        operator: In
+                        values: [spot, on-demand]
+                      - key: karpenter.k8s.aws/instance-category
+                        operator: In
+                        values: ["c", "m"]
+                      - key: karpenter.k8s.aws/instance-cpu
+                        operator: In
+                        values: ["4", "8", "16"]
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values: ["arm64"]
+                      - key: kubernetes.io/os
+                        operator: In
+                        values: [linux]
+                      taints:
+                      - effect: NoExecute
+                        key: istio.io/istio-system
+                        value: "true"
+          ---
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-system-ec2nodeclass
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-system-ec2nodeclass
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: karpenter.k8s.aws/v1
+                kind: EC2NodeClass
+                metadata:
+                  name: istio-system
+                spec:
+                  role: {{ $id }}-nodegroup
+                  subnetSelectorTerms:
+                  - tags:
+                      karpenter.sh/subnetzone: {{ $params.vpcSubnetSelectorPrivate }}
+                  securityGroupSelectorTerms:
+                  - tags:
+                      aws:eks:cluster-name: {{ $id }}
+                  amiSelectorTerms:
+                  - alias: bottlerocket@1.57.0
+                  amiFamily: Bottlerocket
+                  blockDeviceMappings:
+                  - deviceName: /dev/xvda
+                    ebs:
+                      deleteOnTermination: true
+                      volumeType: gp3
+                      volumeSize: 10Gi
+                      encrypted: true
+                      iops: 3000
+                      throughput: 125
+                  - deviceName: /dev/xvdb
+                    ebs:
+                      deleteOnTermination: true
+                      volumeType: gp3
+                      volumeSize: 50Gi
+          ---
+          # istio base CRDs
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-istio-base
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-base
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: base
+                repository: {{ $params.repository }}
+                version: {{ $params.version }}
+              namespace: {{ $params.namespace | default "istio-system" }}
+          ---
+          # istiod control plane
+          # meshNetworks maps each cluster's network to its east-west gateway — this is
+          # what enables cross-cluster service discovery in a multi-network setup.
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-istiod
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istiod
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: istiod
+                repository: {{ $params.repository }}
+                version: {{ $params.version }}
+              namespace: {{ $params.namespace | default "istio-system" }}
+              values:
+                pilot:
+                  autoscaleEnabled: true
+                  autoscaleMin: 2
+                  autoscaleMax: 5
+                  cpu:
+                    targetAverageUtilization: 80
+                topologySpreadConstraints:
+                - labelSelector:
+                    matchLabels:
+                      app: istiod
+                  maxSkew: 1
+                  topologyKey: topology.kubernetes.io/zone
+                  whenUnsatisfiable: DoNotSchedule
+                tolerations:
+                - effect: NoExecute
+                  key: istio.io/istio-system
+                  operator: Equal
+                  value: "true"
+                meshConfig:
+                  accessLogFile: /dev/stdout
+                  defaultConfig:
+                    holdApplicationUntilProxyStarts: true
+                    proxyMetadata:
+                      ISTIO_META_DNS_CAPTURE: "true"
+                      ISTIO_META_DNS_AUTO_ALLOCATE: "true"
+                global:
+                  meshID: {{ $params.meshID }}
+                  meshNetworks:
+                    # Local cluster network
+                    {{ $id }}-istio-network:
+                      endpoints:
+                        - fromRegistry: {{ $id }}
+                      gateways:
+                        - registryServiceName: {{ $id }}-istio-eastwestgateway.{{ $params.namespace | default "istio-system" }}.svc.cluster.local
+                          port: 15443
+                    {{- if and $multicluster (index $multicluster "enabled") }}
+                    {{- range $i := $multicluster.rules }}
+                    {{- if $i.clusterName }}
+                    {{- $remoteIstioNs := $i.istioNamespace | default "istio-system" }}
+                    {{- $remoteGwName := $i.gatewayServiceName | default (printf "%s-istio-eastwestgateway" $i.clusterName) }}
+                    # Remote cluster network: {{ $i.clusterName }}
+                    {{ $i.clusterName }}-istio-network:
+                      endpoints:
+                        - fromRegistry: {{ $i.clusterName }}
+                      gateways:
+                        - registryServiceName: {{ $remoteGwName }}.{{ $remoteIstioNs }}.svc.cluster.local
+                          port: 15443
+                    {{- end }}
+                    {{- end }}
+                    {{- end }}
+                  multiCluster:
+                    clusterName: {{ $id }}
+                  network: {{ $id }}-istio-network
+          ---
+          # East-west gateway — the cross-cluster data plane.
+          # Exposes port 15443 (TLS/AUTO_PASSTHROUGH) for cross-cluster service access.
+          # AWS NLB annotations create an internal NLB with cross-zone load balancing.
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-istio-eastwestgateway
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-eastwestgateway
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: gateway
+                repository: {{ $params.repository }}
+                version: {{ $params.version }}
+              namespace: {{ $params.namespace | default "istio-system" }}
+              values:
+                autoscaling:
+                  enabled: true
+                  minReplicas: 2
+                  maxReplicas: 6
+                  targetCPUUtilizationPercentage: 80
+                podDisruptionBudget:
+                  minAvailable: "50%"
+                  unhealthyPodEvictionPolicy: AlwaysAllow
+                topologySpreadConstraints:
+                - labelSelector:
+                    matchLabels:
+                      istio: eastwestgateway
+                  maxSkew: 1
+                  topologyKey: topology.kubernetes.io/zone
+                  whenUnsatisfiable: DoNotSchedule
+                env:
+                  ISTIO_META_REQUESTED_NETWORK_VIEW: {{ $id }}-istio-network
+                labels:
+                  app: istio-eastwestgateway
+                  istio: eastwestgateway
+                  mesh-region: {{ $params.region }}
+                  topology.istio.io/network: {{ $id }}-istio-network
+                  istio.io/dataplane-mode: none
+                networkGateway: {{ $id }}-istio-network
+                service:
+                  type: LoadBalancer
+                  ports:
+                  - name: tls
+                    port: 15443
+                    targetPort: 15443
+                    nodePort: 31443
+                  annotations:
+                    service.beta.kubernetes.io/aws-load-balancer-type: external
+                    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+                    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+                    service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
+                    service.beta.kubernetes.io/aws-load-balancer-ip-address-type: ipv4
+                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "30"
+                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
+                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "15443"
+                tolerations:
+                - effect: NoExecute
+                  key: istio.io/istio-system
+                  operator: Equal
+                  value: "true"
+          ---
+          # cross-network-gateway: tells the east-west gateway to auto-passthrough
+          # TLS for any *.local host — required for cross-cluster service access.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-cross-network-gateway
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-cross-network-gateway
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: networking.istio.io/v1alpha3
+                kind: Gateway
+                metadata:
+                  name: cross-network-gateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                spec:
+                  selector:
+                    istio: eastwestgateway
+                  servers:
+                  - port:
+                      number: 15443
+                      name: tls
+                      protocol: TLS
+                    tls:
+                      mode: AUTO_PASSTHROUGH
+                    hosts:
+                    - "*.local"
+          ---
+          # istio-reader ServiceAccount: allows istiod to read services/endpoints
+          # from remote clusters via the remote secrets.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-reader-service-account
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-reader-service-account
+          spec:
+            deletionPolicy: Orphan
+            managementPolicies:
+            - Observe
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: ServiceAccount
+                metadata:
+                  name: istio-reader-service-account
+                  namespace: {{ $params.namespace | default "istio-system" }}
+          ---
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-reader-clusterrole
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-reader-clusterrole
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: ClusterRole
+                metadata:
+                  name: istio-reader
+                rules:
+                - apiGroups: [""]
+                  resources: ["namespaces", "services", "endpoints", "pods", "nodes", "secrets"]
+                  verbs: ["get", "list", "watch"]
+                - apiGroups: ["discovery.k8s.io"]
+                  resources: ["endpointslices"]
+                  verbs: ["get", "list", "watch"]
+          ---
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-reader-clusterrolebinding
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-reader-clusterrolebinding
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: ClusterRoleBinding
+                metadata:
+                  name: istio-reader
+                roleRef:
+                  apiGroup: rbac.authorization.k8s.io
+                  kind: ClusterRole
+                  name: istio-reader
+                subjects:
+                - kind: ServiceAccount
+                  name: istio-reader-service-account
+                  namespace: {{ $params.namespace | default "istio-system" }}
+          ---
+          # Long-lived token for istio-reader (required for remote secret kubeconfig)
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-remote-secret-token
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-remote-secret-token
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: istio-reader-service-account-istio-remote-secret-token
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  annotations:
+                    kubernetes.io/service-account.name: istio-reader-service-account
+                    kubernetes.io/service-account.namespace: {{ $params.namespace | default "istio-system" }}
+                type: kubernetes.io/service-account-token
+          ---
+          {{- $tokenRes := get .observed.resources (print $id "-istio-remote-secret-token") | default dict }}
+          {{- $token64 := "" }}
+          {{- if and $tokenRes $tokenRes.resource $tokenRes.resource.status $tokenRes.resource.status.atProvider $tokenRes.resource.status.atProvider.manifest $tokenRes.resource.status.atProvider.manifest.data }}
+            {{- $token64 = (index $tokenRes.resource.status.atProvider.manifest.data "token" | default "") }}
+          {{- end }}
+          {{- $tokenString := "" }}
+          {{- if $token64 }}
+            {{- $tokenString = b64dec $token64 }}
+          {{- end }}
+          # Remote secret for THIS cluster — placed on every peer cluster so istiod
+          # there can discover services running here.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: istio-remote-secret-{{ $id }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: istio-remote-secret-{{ $id }}
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: istio-remote-secret-{{ $id }}
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  annotations:
+                    networking.istio.io/cluster: {{ $id }}
+                  labels:
+                    istio/multiCluster: "true"
+                stringData:
+                  {{ $id }}: |
+                        apiVersion: v1
+                        clusters:
+                        - cluster:
+                            certificate-authority-data: {{ $params.certificateAuthorityData }}
+                            server: {{ $params.clusterEndpoint }}
+                          name: {{ $id }}
+                        contexts:
+                        - context:
+                            cluster: {{ $id }}
+                            user: {{ $id }}
+                          name: {{ $id }}
+                        current-context: {{ $id }}
+                        kind: Config
+                        preferences: {}
+                        users:
+                        - name: {{ $id }}
+                          user:
+                            token: {{ $tokenString }}
+          {{- if and $multicluster (index $multicluster "enabled") }}
+          {{- if $multicluster.rules }}
+          {{- range $i := $multicluster.rules }}
+          {{- if and $i.clusterName $i.region }}
+          ---
+          # Copy remote secret from peer cluster's namespace into this cluster.
+          # The management cluster acts as a hub: each cluster places its remote secret
+          # in its own namespace on the management cluster, and Crossplane copies it here.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: istio-remote-secret-{{ $id }}-{{ $i.clusterName }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: istio-remote-secret-{{ $id }}-{{ $i.clusterName }}
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: istio-remote-secret-{{ $i.clusterName }}
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  annotations:
+                    networking.istio.io/cluster: {{ $i.clusterName }}
+                  labels:
+                    istio/multiCluster: "true"
+            references:
+            - patchesFrom:
+                name: istio-remote-secret-{{ $i.clusterName }}
+                namespace: {{ $i.clusterName }}
+                apiVersion: v1
+                kind: Secret
+                fieldPath: data[{{ $i.clusterName }}]
+              toFieldPath: data[{{ $i.clusterName }}]
+          {{- end }}
+          {{- end }}
+          {{- end }}
+          ---
+          # DestinationRule for Agones allocator: routes allocation requests to the
+          # correct regional subset using the mesh-region header set by the game client.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-allocator-multicluster-destination-rule
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-allocator-multicluster-destination-rule
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: networking.istio.io/v1beta1
+                kind: DestinationRule
+                metadata:
+                  name: allocator-multicluster
+                  namespace: {{ $params.agonesNamespace | default "agones-system" }}
+                spec:
+                  host: agones-allocator.agones-system.svc.cluster.local
+                  trafficPolicy:
+                    tls:
+                      mode: ISTIO_MUTUAL
+                  subsets:
+                  - name: {{ $params.region }}
+                    labels:
+                      mesh-region: {{ $params.region }}
+                  {{- range $i := $multicluster.rules }}
+                  {{- if and $i.clusterName $i.region }}
+                  - name: {{ $i.region }}
+                    labels:
+                      mesh-region: {{ $i.region }}
+                    trafficPolicy:
+                      tls:
+                        mode: ISTIO_MUTUAL
+                      outlierDetection:
+                        consecutiveErrors: 5
+                        interval: 30s
+                        baseEjectionTime: 30s
+                  {{- end }}
+                  {{- end }}
+          ---
+          # VirtualService for Agones allocator: header-based routing to regional subsets.
+          # Clients set the mesh-region header to control which region handles allocation.
+          # The fallback rule returns 400 if the header is missing or invalid.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-allocator-multicluster-virtual-service
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-allocator-multicluster-virtual-service
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: networking.istio.io/v1beta1
+                kind: VirtualService
+                metadata:
+                  name: allocator-multicluster
+                  namespace: {{ $params.agonesNamespace | default "agones-system" }}
+                spec:
+                  hosts:
+                  - agones-allocator.agones-system.svc.cluster.local
+                  http:
+                  # Local region route
+                  - match:
+                    - headers:
+                        mesh-region:
+                          exact: {{ $params.region }}
+                    retries:
+                      attempts: 3
+                      perTryTimeout: 2s
+                      retryOn: 429,409,connect-failure,reset,refused-stream,unavailable,cancelled,retriable-status-codes,resource-exhausted
+                      retryRemoteLocalities: true
+                    timeout: 6s
+                    route:
+                    - destination:
+                        host: agones-allocator.agones-system.svc.cluster.local
+                        subset: {{ $params.region }}
+                        port:
+                          number: 443
+                  {{- range $i := $multicluster.rules }}
+                  {{- if and $i.clusterName $i.region }}
+                  {{- $remoteAgonesNs := $i.agonesNamespace | default "agones-system" }}
+                  # Remote region route: {{ $i.region }}
+                  - match:
+                    - headers:
+                        mesh-region:
+                          exact: {{ $i.region }}
+                    retries:
+                      attempts: 3
+                      perTryTimeout: 2s
+                      retryOn: 429,409,connect-failure,reset,refused-stream,unavailable,cancelled,retriable-status-codes,resource-exhausted
+                      retryRemoteLocalities: true
+                    timeout: 6s
+                    route:
+                    - destination:
+                        host: agones-allocator.{{ $remoteAgonesNs }}.svc.cluster.local
+                        subset: {{ $i.region }}
+                        port:
+                          number: 443
+                  {{- end }}
+                  {{- end }}
+                  # Fallback: reject requests with missing/unknown mesh-region header
+                  - directResponse:
+                      status: 400
+                      body:
+                        string: '{"message":"missing or invalid mesh-region header"}'
+                    headers:
+                      response:
+                        set:
+                          content-type: application/json
+          {{- end }}
+
+  - step: automaticallyDetectReadyComposedResources
+    functionRef:
+      name: function-auto-ready

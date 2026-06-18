@@ -1,0 +1,60 @@
+apiVersion: demo.crossplane.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: gameserver-eu-west-1
+  namespace: demo
+spec:
+  id: gameserver-eu-west-1
+  parameters:
+    region: eu-west-1
+    version: "1.32"
+    awsAccountNumber: "123456789012"
+    vpcId: vpc-0fedcba9876543210
+    subnetIds:
+    - subnet-eee555
+    - subnet-fff666
+    - subnet-ggg777
+    - subnet-hhh888
+    subnetPrivateIds:
+    - subnet-eee555
+    - subnet-fff666
+    subnetPublicIds:
+    - subnet-ggg777
+    - subnet-hhh888
+    karpenterVersion: "1.4.0"
+    corednsAddonVersion: v1.11.4-eksbuild.2
+    kubeproxyAddonVersion: v1.32.0-eksbuild.2
+    vpccniAddonVersion: v1.19.3-eksbuild.1
+    ebsCsiDriverAddonVersion: v1.41.0-eksbuild.1
+    systemNodeSize: medium
+    systemMinNodeCount: 2
+    systemMaxNodeCount: 4
+    istio:
+      enabled: true
+      version: "1.26.2"
+      meshID: demo-mesh
+      multicluster:
+        enabled: true
+        rules:
+        - clusterName: gameserver-us-east-1
+          region: us-east-1
+    agones:
+      enabled: true
+      version: "1.48.0"
+      replicas:
+        allocator: 3
+        controller: 3
+        extensions: 2
+    multicluster:
+      enabled: true
+      multiclusterPolicies:
+      - clusterName: gameserver-eu-west-1
+        region: eu-west-1
+        priority: 1
+        weight: 100
+        namespace: agones-gameservers
+      - clusterName: gameserver-us-east-1
+        region: us-east-1
+        priority: 2
+        weight: 50
+        namespace: agones-gameservers

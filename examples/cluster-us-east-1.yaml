@@ -1,0 +1,63 @@
+apiVersion: demo.crossplane.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: gameserver-us-east-1
+  namespace: demo
+spec:
+  id: gameserver-us-east-1
+  parameters:
+    region: us-east-1
+    version: "1.32"
+    awsAccountNumber: "123456789012"
+    vpcId: vpc-0123456789abcdef0
+    subnetIds:
+    - subnet-aaa111
+    - subnet-bbb222
+    - subnet-ccc333
+    - subnet-ddd444
+    subnetPrivateIds:
+    - subnet-aaa111
+    - subnet-bbb222
+    subnetPublicIds:
+    - subnet-ccc333
+    - subnet-ddd444
+    karpenterVersion: "1.4.0"
+    corednsAddonVersion: v1.11.4-eksbuild.2
+    kubeproxyAddonVersion: v1.32.0-eksbuild.2
+    vpccniAddonVersion: v1.19.3-eksbuild.1
+    ebsCsiDriverAddonVersion: v1.41.0-eksbuild.1
+    systemNodeSize: medium
+    systemMinNodeCount: 2
+    systemMaxNodeCount: 4
+    # Enable Istio with multicluster connecting to eu-west-1
+    istio:
+      enabled: true
+      version: "1.26.2"
+      meshID: demo-mesh
+      multicluster:
+        enabled: true
+        rules:
+        - clusterName: gameserver-eu-west-1
+          region: eu-west-1
+    # Enable Agones
+    agones:
+      enabled: true
+      version: "1.48.0"
+      replicas:
+        allocator: 3
+        controller: 3
+        extensions: 2
+    # Enable multicluster allocation policies
+    multicluster:
+      enabled: true
+      multiclusterPolicies:
+      - clusterName: gameserver-us-east-1
+        region: us-east-1
+        priority: 1
+        weight: 100
+        namespace: agones-gameservers
+      - clusterName: gameserver-eu-west-1
+        region: eu-west-1
+        priority: 2
+        weight: 50
+        namespace: agones-gameservers

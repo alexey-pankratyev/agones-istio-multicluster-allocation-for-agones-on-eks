@@ -1,0 +1,48 @@
+apiVersion: demo.crossplane.io/v1alpha1
+kind: AgonesCluster
+metadata:
+  name: gameserver-us-east-1-agones
+  namespace: demo
+spec:
+  id: gameserver-us-east-1
+  parameters:
+    region: us-east-1
+    awsAccountNumber: "123456789012"
+    version: "1.48.0"
+    vpc_subnet_selector_private: "us-east-1a"
+    vpc_subnet_selector_public: "us-east-1a-public"
+    oidc: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE"
+    istio:
+      enabled: true
+    replicas:
+      allocator: 3
+      controller: 3
+      extensions: 2
+      ping: 2
+    karpenterNodePools:
+    - nodePoolName: gameservers-amd64
+      weight: "100"
+      nodeclass:
+        volumeEnabled: true
+        volumeSize: "30Gi"
+        iops: "3000"
+        throughput: "125"
+        amiFamily: Bottlerocket
+        amiAlias: bottlerocket@1.57.0
+        deviceName: "/dev/xvdb"
+      limits:
+        cpu: "200"
+        memory: "800Gi"
+      capacityType:
+      - spot
+      - on-demand
+      instanceCategory:
+      - c
+      - m
+      instanceCpu:
+      - "4"
+      - "8"
+      - "16"
+      instanceArch:
+      - amd64
+      taintKey: agones.dev/agones-gameservers-amd64

@@ -1,0 +1,9 @@
+apiVersion: meta.pkg.crossplane.io/v1
+kind: Configuration
+metadata:
+  annotations:
+    version: v0.1.0
+  name: agones
+spec:
+  crossplane:
+    version: '>=v1.5.0'

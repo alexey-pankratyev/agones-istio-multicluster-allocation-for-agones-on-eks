@@ -1,0 +1,23 @@
+apiVersion: demo.crossplane.io/v1alpha1
+kind: Istio
+metadata:
+  name: gameserver-us-east-1-istio
+  namespace: demo
+spec:
+  id: gameserver-us-east-1
+  parameters:
+    region: us-east-1
+    version: "1.26.2"
+    meshID: demo-mesh
+    # These come from the EKS cluster outputs
+    clusterEndpoint: "https://EXAMPLED539D4633E53DE1B71EXAMPLE.gr7.us-east-1.eks.amazonaws.com"
+    certificateAuthorityData: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t..."
+    awsAccountNumber: "123456789012"
+    vpcSubnetSelectorPrivate: "us-east-1a"
+    multicluster:
+      enabled: true
+      rules:
+      - clusterName: gameserver-eu-west-1
+        region: eu-west-1
+        agonesNamespace: agones-system
+        istioNamespace: istio-system

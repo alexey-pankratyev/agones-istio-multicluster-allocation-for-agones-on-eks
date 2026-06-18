@@ -1,0 +1,161 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xagonesclusters.demo.crossplane.io
+spec:
+  defaultCompositionRef:
+    name: xagones-aws
+  group: demo.crossplane.io
+  names:
+    kind: XAgonesCluster
+    plural: xagonesclusters
+  claimNames:
+    kind: AgonesCluster
+    plural: agonesclusters
+  connectionSecretKeys:
+  - tls_crt
+  - tls_key
+  - ca_crt
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              id:
+                description: ID of the Agones GameServer Cluster.
+                type: string
+              parameters:
+                type: object
+                properties:
+                  istio:
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                  replicas:
+                    type: object
+                    properties:
+                      allocator:
+                        type: integer
+                        default: 3
+                      controller:
+                        type: integer
+                        default: 3
+                      extensions:
+                        type: integer
+                        default: 2
+                      ping:
+                        type: integer
+                        default: 2
+                  region:
+                    type: string
+                  awsAccountNumber:
+                    type: string
+                  vpc_subnet_selector_private:
+                    type: string
+                    description: Subnet selector tag value for Agones system nodes (private subnets).
+                  vpc_subnet_selector_public:
+                    type: string
+                    description: Subnet selector tag value for game server nodes (public subnets).
+                  version:
+                    description: Agones Helm chart version.
+                    type: string
+                    default: "1.48.0"
+                  oidc:
+                    type: string
+                    description: OIDC provider URL (without https://) for IRSA
+                  karpenterNodePools:
+                    type: array
+                    description: Karpenter NodePools for game server workloads.
+                    items:
+                      type: object
+                      properties:
+                        nodePoolName:
+                          type: string
+                        weight:
+                          type: string
+                          default: "50"
+                        nodeclass:
+                          type: object
+                          properties:
+                            volumeEnabled:
+                              type: boolean
+                            volumeSize:
+                              type: string
+                              default: "30Gi"
+                            iops:
+                              type: string
+                              default: "3000"
+                            throughput:
+                              type: string
+                              default: "125"
+                            amiFamily:
+                              type: string
+                              default: Bottlerocket
+                            amiAlias:
+                              type: string
+                              default: bottlerocket@1.57.0
+                            deviceName:
+                              type: string
+                              default: "/dev/xvdb"
+                          required:
+                          - volumeEnabled
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                            memory:
+                              type: string
+                          required:
+                          - cpu
+                          - memory
+                        capacityType:
+                          type: array
+                          items:
+                            type: string
+                        instanceCategory:
+                          type: array
+                          items:
+                            type: string
+                          default: []
+                        instanceCpu:
+                          type: array
+                          items:
+                            type: string
+                          default: []
+                        instanceArch:
+                          type: array
+                          items:
+                            type: string
+                        taintKey:
+                          type: string
+                      required:
+                      - nodeclass
+                      - nodePoolName
+                      - limits
+                      - capacityType
+                      - instanceArch
+                      - taintKey
+                required:
+                - region
+                - version
+                - awsAccountNumber
+                - vpc_subnet_selector_private
+                - vpc_subnet_selector_public
+            required:
+            - parameters
+            - id
+          status:
+            type: object
+            properties:
+              values:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true

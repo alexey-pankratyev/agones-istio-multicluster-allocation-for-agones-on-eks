@@ -1,0 +1,151 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xistios.demo.crossplane.io
+spec:
+  defaultCompositionRef:
+    name: xistio-aws
+  group: demo.crossplane.io
+  names:
+    kind: XIstio
+    plural: xistios
+  claimNames:
+    kind: Istio
+    plural: istios
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              id:
+                type: string
+                description: ID of this Cluster that other objects will use to refer to it.
+              parameters:
+                type: object
+                properties:
+                  version:
+                    description: Istio version. Use 1.26.2+ recommended.
+                    type: string
+                  region:
+                    description: AWS region for the cluster.
+                    type: string
+                  repository:
+                    description: Istio Helm chart repository.
+                    type: string
+                    default: https://istio-release.storage.googleapis.com/charts
+                  meshID:
+                    description: |
+                      Mesh ID shared across all clusters in the mesh.
+                      All clusters must use the same meshID.
+                    type: string
+                  clusterEndpoint:
+                    type: string
+                    description: Kubernetes API server endpoint (from EKS cluster output).
+                  certificateAuthorityData:
+                    type: string
+                    description: Base64-encoded cluster CA certificate.
+                  awsAccountNumber:
+                    type: string
+                  namespace:
+                    type: string
+                    description: Namespace for Istio control plane. Defaults to "istio-system".
+                    default: istio-system
+                  agonesNamespace:
+                    type: string
+                    description: Namespace where Agones is installed. Defaults to "agones-system".
+                    default: agones-system
+                  multicluster:
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                      externalIngressGateway:
+                        type: boolean
+                        default: false
+                      rules:
+                        description: |
+                          List of remote clusters to connect via Istio service mesh.
+                          Each entry adds a remote cluster's east-west gateway to the mesh
+                          and creates the cross-cluster routing rules for Agones allocator.
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            clusterName:
+                              type: string
+                              description: Remote cluster ID (must match spec.id of that cluster's Istio claim).
+                            region:
+                              type: string
+                              description: AWS region of the remote cluster.
+                            agonesNamespace:
+                              type: string
+                              description: Agones namespace on remote cluster. Defaults to "agones-system".
+                              default: agones-system
+                            istioNamespace:
+                              type: string
+                              description: Istio namespace on remote cluster. Defaults to "istio-system".
+                              default: istio-system
+                            gatewayServiceName:
+                              type: string
+                              description: |
+                                Override the east-west gateway service name on the remote cluster.
+                                Defaults to "<clusterName>-istio-eastwestgateway".
+                  kiali:
+                    type: object
+                    description: Kiali observability addon
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                      version:
+                        type: string
+                        default: "2.21.0"
+                      prometheusUrl:
+                        type: string
+                      grafanaUrl:
+                        type: string
+                      ingress:
+                        type: object
+                        properties:
+                          enabled:
+                            type: boolean
+                            default: false
+                          certificateArn:
+                            type: string
+                  tolerations:
+                    type: array
+                    description: Tolerations for Istio pods (istiod, east-west gateway).
+                    items:
+                      type: object
+                      properties:
+                        key:
+                          type: string
+                        operator:
+                          type: string
+                          default: "Exists"
+                        value:
+                          type: string
+                        effect:
+                          type: string
+                required:
+                - region
+                - meshID
+                - version
+                - clusterEndpoint
+                - certificateAuthorityData
+            required:
+            - id
+            - parameters
+          status:
+            type: object
+            properties:
+              values:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true

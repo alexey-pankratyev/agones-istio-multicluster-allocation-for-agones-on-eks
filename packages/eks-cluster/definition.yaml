@@ -1,0 +1,190 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xkubernetesclusters.demo.crossplane.io
+spec:
+  defaultCompositionRef:
+    name: xkubernetes-aws
+  group: demo.crossplane.io
+  names:
+    kind: XKubernetesCluster
+    plural: xkubernetesclusters
+  claimNames:
+    kind: KubernetesCluster
+    plural: kubernetesclusters
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              id:
+                type: string
+                description: ID of this Cluster that other objects will use to refer to it.
+              parameters:
+                type: object
+                properties:
+                  version:
+                    description: The Kubernetes version for the cluster.
+                    type: string
+                    default: "1.32"
+                  region:
+                    description: AWS region for the cluster.
+                    type: string
+                  vpcId:
+                    description: VPC Id
+                    type: string
+                  subnetIds:
+                    description: All subnet IDs (public + private)
+                    items:
+                      type: string
+                    type: array
+                  subnetPrivateIds:
+                    description: Private subnet IDs for node groups
+                    items:
+                      type: string
+                    type: array
+                  subnetPublicIds:
+                    description: Public subnet IDs
+                    items:
+                      type: string
+                    type: array
+                  awsAccountNumber:
+                    description: AWS account number
+                    type: string
+                  systemNodeSize:
+                    description: System node instance size
+                    type: string
+                    enum:
+                    - small    # t3a.medium
+                    - medium   # t3a.xlarge
+                    - large    # t3a.2xlarge
+                    default: medium
+                  systemMinNodeCount:
+                    type: integer
+                    default: 2
+                  systemMaxNodeCount:
+                    type: integer
+                    default: 6
+                  karpenterVersion:
+                    description: Karpenter Helm chart version.
+                    type: string
+                    default: "1.4.0"
+                  corednsAddonVersion:
+                    type: string
+                  kubeproxyAddonVersion:
+                    type: string
+                  vpccniAddonVersion:
+                    type: string
+                  ebsCsiDriverAddonVersion:
+                    type: string
+                  istio:
+                    description: Istio installation parameters
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                      version:
+                        type: string
+                        default: "1.26.2"
+                      meshID:
+                        type: string
+                      multicluster:
+                        type: object
+                        properties:
+                          enabled:
+                            type: boolean
+                            default: false
+                          rules:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                clusterName:
+                                  type: string
+                                region:
+                                  type: string
+                                agonesNamespace:
+                                  type: string
+                                  default: agones-system
+                                istioNamespace:
+                                  type: string
+                                  default: istio-system
+                                gatewayServiceName:
+                                  type: string
+                  agones:
+                    description: Agones installation parameters
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                      version:
+                        type: string
+                        default: "1.48.0"
+                      replicas:
+                        type: object
+                        properties:
+                          allocator:
+                            type: integer
+                            default: 3
+                          controller:
+                            type: integer
+                            default: 3
+                          extensions:
+                            type: integer
+                            default: 2
+                  multicluster:
+                    type: object
+                    properties:
+                      enabled:
+                        type: boolean
+                        default: false
+                      multiclusterPolicies:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            clusterName:
+                              type: string
+                            priority:
+                              type: integer
+                            weight:
+                              type: integer
+                            region:
+                              type: string
+                            namespace:
+                              type: string
+                              default: agones-gameservers
+                required:
+                - region
+                - vpcId
+                - subnetIds
+                - subnetPrivateIds
+                - subnetPublicIds
+                - awsAccountNumber
+                - karpenterVersion
+                - version
+                - vpccniAddonVersion
+                - corednsAddonVersion
+                - kubeproxyAddonVersion
+                - ebsCsiDriverAddonVersion
+            required:
+            - id
+            - parameters
+          status:
+            type: object
+            properties:
+              values:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              clusterName:
+                type: string
+              controlPlaneStatus:
+                type: string
