@@ -47,17 +47,3 @@ spec:
         allocator: 3
         controller: 3
         extensions: 2
-    # Enable multicluster allocation policies
-    multicluster:
-      enabled: true
-      multiclusterPolicies:
-      - clusterName: gameserver-us-east-1
-        region: us-east-1
-        priority: 1
-        weight: 100
-        namespace: agones-gameservers
-      - clusterName: gameserver-eu-west-1
-        region: eu-west-1
-        priority: 2
-        weight: 50
-        namespace: agones-gameservers

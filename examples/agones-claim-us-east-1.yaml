@@ -45,4 +45,4 @@ spec:
       - "16"
       instanceArch:
       - amd64
-      taintKey: agones.dev/agones-gameservers-amd64
+      taintKey: agones.dev/agones-gameservers-arm64

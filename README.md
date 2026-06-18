@@ -1,4 +1,4 @@
-# Zero-Latency Everywhere: Multi-Region Game Server Allocation on EKS with Agones and Istio
+# Multi-Region Game Server Allocation on EKS with Agones and Istio
 
 > **TL;DR** — This repository contains production-tested Crossplane packages that wire together EKS, Agones, and Istio into a self-managing multi-region game server platform. A matchmaker sends one gRPC call; Istio's service mesh routes it to the nearest available game server — regardless of which cluster it lives in.
 
@@ -20,8 +20,8 @@ This post shows you how to build exactly that — declaratively, using Crossplan
 
 ```
                           ┌─────────────────────────────────────────────────┐
-                          │              Crossplane Management Cluster        │
-                          │                                                   │
+                          │              Crossplane Management Cluster      │
+                          │                                                 │
                           │  ┌──────────────┐    ┌──────────────────────┐   │
                           │  │  kubernetes  │    │   agones + istio     │   │
                           │  │   package    │    │     packages         │   │
@@ -29,7 +29,7 @@ This post shows you how to build exactly that — declaratively, using Crossplan
                           └─────────────────────────────────────────────────┘
                                         │                   │
                          ┌──────────────┘                   └──────────────┐
-                         ▼                                                   ▼
+                         ▼                                                 ▼
           ┌──────────────────────────┐                  ┌──────────────────────────┐
           │   EKS Cluster us-east-1  │                  │   EKS Cluster eu-west-1  │
           │                          │                  │                          │
