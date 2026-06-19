@@ -6,4 +6,4 @@ metadata:
   name: eks-cluster
 spec:
   crossplane:
-    version: '>=v1.18.0'
+    version: '>=v2.1.4'

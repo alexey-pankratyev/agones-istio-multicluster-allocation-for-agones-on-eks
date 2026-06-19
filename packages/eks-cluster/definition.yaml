@@ -32,28 +32,50 @@ spec:
                   version:
                     description: The Kubernetes version for the cluster.
                     type: string
-                    default: "1.32"
+                    default: "1.35"
                   region:
                     description: AWS region for the cluster.
                     type: string
+
+                  # ── Networking ─────────────────────────────────────────────
+                  # When vpcId is omitted a new VPC is created via the vpc package.
+                  # vpc.cidr selects which /16 block to use (one per cluster).
+                  vpc:
+                    description: |
+                      VPC configuration. When vpcId is not provided a new VPC is
+                      created automatically using the vpc Crossplane package.
+                    type: object
+                    properties:
+                      cidr:
+                        description: CIDR for the new VPC (e.g. 10.100.0.0/16).
+                        type: string
+                        default: "10.100.0.0/16"
+                      availabilityZones:
+                        description: AZs to create subnets in.
+                        type: array
+                        items:
+                          type: string
+
+                  # Explicit subnet overrides — omit to use auto-created subnets.
                   vpcId:
-                    description: VPC Id
+                    description: Existing VPC Id. Leave empty to create a new VPC.
                     type: string
                   subnetIds:
-                    description: All subnet IDs (public + private).
+                    description: All subnet IDs (public + private). Leave empty to use auto-created subnets.
                     items:
                       type: string
                     type: array
                   subnetPrivateIds:
-                    description: Private subnet IDs for system/Istio node groups.
+                    description: Private subnet IDs. Leave empty to use auto-created subnets.
                     items:
                       type: string
                     type: array
                   subnetPublicIds:
-                    description: Public subnet IDs for game server node groups.
+                    description: Public subnet IDs. Leave empty to use auto-created subnets.
                     items:
                       type: string
                     type: array
+
                   awsAccountNumber:
                     description: AWS account number.
                     type: string
@@ -74,15 +96,19 @@ spec:
                   karpenterVersion:
                     description: Karpenter Helm chart version.
                     type: string
-                    default: "1.4.0"
+                    default: "1.13.0"
                   corednsAddonVersion:
                     type: string
+                    default: "v1.13.1-eksbuild.1"
                   kubeproxyAddonVersion:
                     type: string
+                    default: "v1.35.0-eksbuild.2"
                   vpccniAddonVersion:
                     type: string
+                    default: "v1.21.1-eksbuild.1"
                   ebsCsiDriverAddonVersion:
                     type: string
+                    default: "v1.56.0-eksbuild.1"
 
                   istio:
                     description: |
@@ -154,7 +180,7 @@ spec:
                         default: false
                       version:
                         type: string
-                        default: "1.48.0"
+                        default: "1.55.0"
                       replicas:
                         type: object
                         properties:
@@ -171,14 +197,10 @@ spec:
                         description: |
                           Karpenter subnet selector tag for game server nodes.
                           Game server pods need public IPs for UDP reachability.
+                          Defaults to <first-az>-public when using auto-created VPC.
                         type: string
                       vpcSubnetSelectorPrivate:
                         description: Karpenter subnet selector tag for Agones system nodes.
-                        type: string
-                      oidc:
-                        description: |
-                          OIDC provider URL (without https://) for IRSA.
-                          Used to create the agones-sdk ServiceAccount IAM role.
                         type: string
                       karpenterNodePools:
                         description: Karpenter NodePools for game server workloads.
@@ -256,17 +278,7 @@ spec:
 
                 required:
                 - region
-                - vpcId
-                - subnetIds
-                - subnetPrivateIds
-                - subnetPublicIds
                 - awsAccountNumber
-                - karpenterVersion
-                - version
-                - vpccniAddonVersion
-                - corednsAddonVersion
-                - kubeproxyAddonVersion
-                - ebsCsiDriverAddonVersion
             required:
             - id
             - parameters
@@ -279,4 +291,6 @@ spec:
               clusterName:
                 type: string
               controlPlaneStatus:
+                type: string
+              vpcId:
                 type: string

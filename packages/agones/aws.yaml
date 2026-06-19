@@ -26,6 +26,41 @@ spec:
           {{- $id := $spec.id }}
           {{- $params := $spec.parameters }}
           {{- $istioEnabled := and $params.istio (index $params.istio "enabled") }}
+          {{- $oidc := $params.oidc | default "" }}
+
+          {{- if $oidc }}
+          ---
+          # IAM Role for agones-sdk ServiceAccount (IRSA)
+          # Allows game server pods to call AWS APIs (e.g. S3 for replays) via
+          # the agones-sdk ServiceAccount in the agones-gameservers namespace.
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Role
+          metadata:
+            name: {{ $id }}-role-agones-sdk
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-role-agones-sdk
+          spec:
+            forProvider:
+              assumeRolePolicy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Principal": {
+                        "Federated": "arn:aws:iam::{{ $params.awsAccountNumber }}:oidc-provider/{{ $oidc }}"
+                      },
+                      "Action": "sts:AssumeRoleWithWebIdentity",
+                      "Condition": {
+                        "StringEquals": {
+                          "{{ $oidc }}:aud": "sts.amazonaws.com",
+                          "{{ $oidc }}:sub": "system:serviceaccount:agones-gameservers:agones-sdk"
+                        }
+                      }
+                    }
+                  ]
+                }
+          {{- end }}
           ---
           # Agones system namespace with Istio labels
           apiVersion: kubernetes.crossplane.io/v1alpha2

@@ -3,7 +3,7 @@ kind: Configuration
 metadata:
   annotations:
     version: v0.1.0
-  name: istio
+  name: vpc
 spec:
   crossplane:
     version: '>=v2.1.4'

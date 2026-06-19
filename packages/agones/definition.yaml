@@ -67,10 +67,12 @@ spec:
                   version:
                     description: Agones Helm chart version.
                     type: string
-                    default: "1.48.0"
+                    default: "1.55.0"
                   oidc:
                     type: string
-                    description: OIDC provider URL (without https://) for IRSA
+                    description: |
+                      OIDC provider URL (without https://) for IRSA trust policy.
+                      Auto-derived from EKS cluster status when not specified explicitly.
                   karpenterNodePools:
                     type: array
                     description: Karpenter NodePools for game server workloads.

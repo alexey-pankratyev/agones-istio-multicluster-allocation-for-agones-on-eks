@@ -1,0 +1,69 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xvpcs.demo.crossplane.io
+spec:
+  defaultCompositionRef:
+    name: xvpc-aws
+  group: demo.crossplane.io
+  names:
+    kind: XVPC
+    plural: xvpcs
+  claimNames:
+    kind: VPC
+    plural: vpcs
+  versions:
+  - name: v1alpha1
+    served: true
+    referenceable: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              id:
+                type: string
+                description: ID of this VPC that other objects will use to refer to it.
+              parameters:
+                type: object
+                properties:
+                  region:
+                    description: AWS region.
+                    type: string
+                  cidr:
+                    description: VPC CIDR block.
+                    type: string
+                  availabilityZones:
+                    description: List of AZs to spread subnets across (e.g. eu-west-1a, eu-west-1b).
+                    type: array
+                    items:
+                      type: string
+                required:
+                - region
+                - cidr
+                - availabilityZones
+            required:
+            - id
+            - parameters
+          status:
+            type: object
+            properties:
+              vpcId:
+                type: string
+              subnetIds:
+                type: array
+                items:
+                  type: string
+              subnetPrivateIds:
+                type: array
+                items:
+                  type: string
+              subnetPublicIds:
+                type: array
+                items:
+                  type: string
+              values:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true

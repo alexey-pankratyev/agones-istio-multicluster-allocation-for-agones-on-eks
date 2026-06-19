@@ -7,28 +7,25 @@ spec:
   id: gameserver-eu-west-1
   parameters:
     region: eu-west-1
-    version: "1.32"
+    version: "1.35"
     awsAccountNumber: "123456789012"
-    vpcId: vpc-0fedcba9876543210
-    subnetIds:
-    - subnet-eee555   # private eu-west-1a
-    - subnet-fff666   # private eu-west-1b
-    - subnet-ggg777   # public  eu-west-1a
-    - subnet-hhh888   # public  eu-west-1b
-    subnetPrivateIds:
-    - subnet-eee555
-    - subnet-fff666
-    subnetPublicIds:
-    - subnet-ggg777
-    - subnet-hhh888
+
+    # VPC is created automatically. Each cluster uses its own /16 range.
+    vpc:
+      cidr: "10.100.0.0/16"
+      availabilityZones:
+      - eu-west-1a
+      - eu-west-1b
+
     systemNodeSize: medium
     systemMinNodeCount: 2
     systemMaxNodeCount: 4
-    karpenterVersion: "1.4.0"
-    corednsAddonVersion: v1.11.4-eksbuild.2
-    kubeproxyAddonVersion: v1.32.0-eksbuild.2
-    vpccniAddonVersion: v1.19.3-eksbuild.1
-    ebsCsiDriverAddonVersion: v1.41.0-eksbuild.1
+
+    karpenterVersion: "1.13.0"
+    corednsAddonVersion: "v1.13.1-eksbuild.1"
+    kubeproxyAddonVersion: "v1.35.0-eksbuild.2"
+    vpccniAddonVersion: "v1.21.1-eksbuild.1"
+    ebsCsiDriverAddonVersion: "v1.56.0-eksbuild.1"
 
     istio:
       enabled: true
@@ -47,10 +44,9 @@ spec:
 
     agones:
       enabled: true
-      version: "1.48.0"
-      vpcSubnetSelectorPrivate: "eu-west-1a"
-      vpcSubnetSelectorPublic: "eu-west-1a-public"
-      oidc: "oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLEF649E5844F64FE2B82EXAMPLE"
+      version: "1.55.0"
+      # Subnet selectors default to <first-az> and <first-az>-public when using
+      # auto-created VPC, so these fields can be omitted.
       replicas:
         allocator: 3
         controller: 3

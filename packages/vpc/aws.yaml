@@ -1,0 +1,246 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  labels:
+    provider: aws
+  annotations:
+    version: v0.1.0
+  name: xvpc-aws
+spec:
+  compositeTypeRef:
+    apiVersion: demo.crossplane.io/v1alpha1
+    kind: XVPC
+  mode: Pipeline
+  pipeline:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step 1: VPC, subnets, IGW, NAT GW, route tables
+  # Each AZ gets one private + one public subnet.
+  # Private subnets tagged karpenter.sh/subnetzone=<az> for Karpenter.
+  # Public subnets tagged karpenter.sh/subnetzone=<az>-public.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - step: CreateVPC
+    functionRef:
+      name: function-go-templating
+    input:
+      apiVersion: gotemplating.fn.crossplane.io/v1beta1
+      kind: GoTemplate
+      source: Inline
+      inline:
+        template: |
+          {{- $spec := .observed.composite.resource.spec }}
+          {{- $id := $spec.id }}
+          {{- $params := $spec.parameters }}
+          {{- $region := $params.region }}
+          {{- $cidr := $params.cidr }}
+          {{- $azs := $params.availabilityZones }}
+
+          {{- /*
+            Split the /16 CIDR into /24 private and /24 public subnets per AZ.
+            For cidr 10.100.0.0/16:
+              AZ index 0: private 10.100.0.0/24, public 10.100.100.0/24
+              AZ index 1: private 10.100.1.0/24, public 10.100.101.0/24
+            The base octet is derived from the second octet of the CIDR.
+          */ -}}
+          {{- $cidrBase := $cidr | splitList "." | slice 0 2 | join "." }}
+          ---
+          # VPC
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: VPC
+          metadata:
+            name: {{ $id }}-vpc
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-vpc
+          spec:
+            forProvider:
+              region: {{ $region }}
+              cidrBlock: {{ $cidr }}
+              enableDnsHostnames: true
+              enableDnsSupport: true
+              tags:
+                Name: {{ $id }}-vpc
+          ---
+          # Internet Gateway
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: InternetGateway
+          metadata:
+            name: {{ $id }}-igw
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-igw
+          spec:
+            forProvider:
+              region: {{ $region }}
+              vpcIdRef:
+                name: {{ $id }}-vpc
+              tags:
+                Name: {{ $id }}-igw
+          ---
+          # Public route table (shared across all AZs)
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: RouteTable
+          metadata:
+            name: {{ $id }}-rt-public
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-rt-public
+          spec:
+            forProvider:
+              region: {{ $region }}
+              vpcIdRef:
+                name: {{ $id }}-vpc
+              tags:
+                Name: {{ $id }}-rt-public
+          ---
+          # Default route via IGW for public route table
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: Route
+          metadata:
+            name: {{ $id }}-route-public-igw
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-route-public-igw
+          spec:
+            forProvider:
+              region: {{ $region }}
+              routeTableIdRef:
+                name: {{ $id }}-rt-public
+              destinationCidrBlock: "0.0.0.0/0"
+              gatewayIdRef:
+                name: {{ $id }}-igw
+
+          {{- range $i, $az := $azs }}
+          ---
+          # Public subnet for AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: Subnet
+          metadata:
+            name: {{ $id }}-subnet-public-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-subnet-public-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              availabilityZone: {{ $az }}
+              vpcIdRef:
+                name: {{ $id }}-vpc
+              cidrBlock: {{ $cidrBase }}.{{ add 100 $i }}.0/24
+              mapPublicIpOnLaunch: true
+              tags:
+                Name: {{ $id }}-public-{{ $az }}
+                kubernetes.io/role/elb: "1"
+                karpenter.sh/subnetzone: {{ $az }}-public
+          ---
+          # Private subnet for AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: Subnet
+          metadata:
+            name: {{ $id }}-subnet-private-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-subnet-private-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              availabilityZone: {{ $az }}
+              vpcIdRef:
+                name: {{ $id }}-vpc
+              cidrBlock: {{ $cidrBase }}.{{ $i }}.0/24
+              mapPublicIpOnLaunch: false
+              tags:
+                Name: {{ $id }}-private-{{ $az }}
+                kubernetes.io/role/internal-elb: "1"
+                karpenter.sh/subnetzone: {{ $az }}
+          ---
+          # Elastic IP for NAT GW in AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: EIP
+          metadata:
+            name: {{ $id }}-eip-nat-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-eip-nat-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              vpc: true
+              tags:
+                Name: {{ $id }}-nat-{{ $az }}
+          ---
+          # NAT Gateway in public subnet for AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: NATGateway
+          metadata:
+            name: {{ $id }}-natgw-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-natgw-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              allocationIdRef:
+                name: {{ $id }}-eip-nat-{{ $i }}
+              subnetIdRef:
+                name: {{ $id }}-subnet-public-{{ $i }}
+              tags:
+                Name: {{ $id }}-natgw-{{ $az }}
+          ---
+          # Private route table for AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: RouteTable
+          metadata:
+            name: {{ $id }}-rt-private-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-rt-private-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              vpcIdRef:
+                name: {{ $id }}-vpc
+              tags:
+                Name: {{ $id }}-rt-private-{{ $az }}
+          ---
+          # Default route via NAT GW for private route table in AZ {{ $az }}
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: Route
+          metadata:
+            name: {{ $id }}-route-private-nat-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-route-private-nat-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              routeTableIdRef:
+                name: {{ $id }}-rt-private-{{ $i }}
+              destinationCidrBlock: "0.0.0.0/0"
+              natGatewayIdRef:
+                name: {{ $id }}-natgw-{{ $i }}
+          ---
+          # Associate public subnet {{ $i }} with public route table
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: RouteTableAssociation
+          metadata:
+            name: {{ $id }}-rta-public-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-rta-public-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              subnetIdRef:
+                name: {{ $id }}-subnet-public-{{ $i }}
+              routeTableIdRef:
+                name: {{ $id }}-rt-public
+          ---
+          # Associate private subnet {{ $i }} with its private route table
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: RouteTableAssociation
+          metadata:
+            name: {{ $id }}-rta-private-{{ $i }}
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-rta-private-{{ $i }}
+          spec:
+            forProvider:
+              region: {{ $region }}
+              subnetIdRef:
+                name: {{ $id }}-subnet-private-{{ $i }}
+              routeTableIdRef:
+                name: {{ $id }}-rt-private-{{ $i }}
+          {{- end }}
+
+  - step: automaticallyDetectReadyComposedResources
+    functionRef:
+      name: function-auto-ready
