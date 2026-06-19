@@ -4,6 +4,39 @@
 
 ---
 
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [Repository Structure](#repository-structure)
+- [Architecture](#architecture)
+  - [Networking: Auto-Provisioned VPC per Cluster](#networking-auto-provisioned-vpc-per-cluster)
+  - [Istio Multi-Primary on Different Networks](#istio-multi-primary-on-different-networks)
+  - [Remote Secret Exchange (Service Discovery)](#remote-secret-exchange-service-discovery)
+  - [Shared Root CA](#shared-root-ca)
+  - [OIDC / IRSA - Auto-Derived](#oidc--irsa---auto-derived)
+  - [Agones Multi-Cluster Allocation Flow](#agones-multi-cluster-allocation-flow)
+- [Default Versions](#default-versions)
+- [Deployment](#deployment)
+  - [Prerequisites](#prerequisites)
+    - [Installing Crossplane on the management cluster](#installing-crossplane-on-the-management-cluster)
+  - [Quick start — one command](#quick-start--one-command)
+  - [Step by step](#step-by-step)
+  - [Tracking progress](#tracking-progress)
+  - [What gets provisioned](#what-gets-provisioned)
+  - [Getting kubeconfigs](#getting-kubeconfigs)
+  - [Verify the Istio mesh](#verify-the-istio-mesh)
+  - [Test allocation](#test-allocation)
+    - [Local allocation](#local-allocation)
+    - [Cross-cluster allocation via Istio mesh](#cross-cluster-allocation-via-istio-mesh)
+    - [Resetting GameServers between test runs](#resetting-gameservers-between-test-runs)
+  - [Teardown](#teardown)
+- [Key Design Decisions](#key-design-decisions)
+- [Routing Logic Reference](#routing-logic-reference)
+- [Production Notes](#production-notes)
+- [Further Reading](#further-reading)
+
+---
+
 ## The Problem
 
 You run game servers on AWS. Players are in North America and Europe. You want the nearest cluster to handle allocation, but fall back to the other region when one is saturated. Your matchmaker should not care about cluster topology.
