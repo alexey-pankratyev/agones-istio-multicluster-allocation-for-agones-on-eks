@@ -1,6 +1,6 @@
 # Multi-Region Game Server Allocation on EKS with Agones and Istio
 
-> This project deploys a multi-region game server infrastructure on Amazon EKS using Crossplane — a single claim per region provisions the full stack: VPC with public and private subnets, EKS, Agones allocator, Karpenter SPOT node pools, and an Istio multi-primary mesh — with OIDC/IRSA roles derived automatically from cluster status; two clusters form one Istio mesh with a shared mTLS root CA and east-west gateways for cross-cluster traffic; the matchmaker calls a single local gRPC endpoint — Istio routes allocation requests by `mesh-region` header and retries across regions on failure, no per-region endpoint logic required in application code.
+> This project deploys a multi-region game server infrastructure on Amazon EKS using Crossplane - a single claim per region provisions the full stack: VPC with public and private subnets, EKS, Agones allocator, Karpenter SPOT node pools, and an Istio multi-primary mesh - with OIDC/IRSA roles derived automatically from cluster status; two clusters form one Istio mesh with a shared mTLS root CA and east-west gateways for cross-cluster traffic; the matchmaker calls a single local gRPC endpoint - Istio routes allocation requests by `mesh-region` header and retries across regions on failure, no per-region endpoint logic required in application code.
 
 ---
 
@@ -41,7 +41,7 @@ The solution here: Agones multi-cluster allocation routed by an Istio service me
     └── cluster-eu-west-1.yaml   # Full claim: EKS + Agones + Istio in eu-west-1
 ```
 
-**One claim per cluster.** The `eks-cluster` Composition first creates a `XVPC` nested XR (networking), then calls the `agones` and `istio` packages as further nested composite resources — you do not apply separate VPC, Agones, or Istio claims.
+**One claim per cluster.** The `eks-cluster` Composition first creates a `XVPC` nested XR (networking), then calls the `agones` and `istio` packages as further nested composite resources - you do not apply separate VPC, Agones, or Istio claims.
 
 ---
 
@@ -49,7 +49,7 @@ The solution here: Agones multi-cluster allocation routed by an Istio service me
 
 ### Networking: Auto-Provisioned VPC per Cluster
 
-Each cluster gets its own VPC created automatically by the `vpc` package. No pre-existing subnets or VPC IDs are required in the claim — just specify a CIDR block and the availability zones.
+Each cluster gets its own VPC created automatically by the `vpc` package. No pre-existing subnets or VPC IDs are required in the claim - just specify a CIDR block and the availability zones.
 
 ```
 vpc.cidr: 10.100.0.0/16  (eu-west-1)     vpc.cidr: 10.110.0.0/16  (us-east-1)
@@ -62,8 +62,8 @@ Per AZ layout (eu-west-1, /16 base = 10.100):
   AZ 1 (eu-west-1b):  private 10.100.1.0/24   public 10.100.101.0/24
 
 Resources created per AZ:
-  • Private subnet  — tagged karpenter.sh/subnetzone=<az>         (Agones system nodes)
-  • Public subnet   — tagged karpenter.sh/subnetzone=<az>-public  (game server nodes)
+  • Private subnet  - tagged karpenter.sh/subnetzone=<az>         (Agones system nodes)
+  • Public subnet   - tagged karpenter.sh/subnetzone=<az>-public  (game server nodes)
   • Elastic IP + NAT Gateway in the public subnet
   • Private route table routing 0.0.0.0/0 → NAT GW
 Public route table (shared) routing 0.0.0.0/0 → Internet Gateway
@@ -71,7 +71,7 @@ Public route table (shared) routing 0.0.0.0/0 → Internet Gateway
 
 The Karpenter `EC2NodeClass` subnet selectors default to the first AZ's tags (`<region>a` and `<region>a-public`) when not overridden in the claim.
 
-To use an existing VPC instead, set `vpcId`, `subnetIds`, `subnetPrivateIds`, and `subnetPublicIds` explicitly in the claim — the XVPC step is skipped in that case.
+To use an existing VPC instead, set `vpcId`, `subnetIds`, `subnetPrivateIds`, and `subnetPublicIds` explicitly in the claim - the XVPC step is skipped in that case.
 
 ### Istio Multi-Primary on Different Networks
 
@@ -175,20 +175,20 @@ Management cluster cert-manager
 
 Exactly **one cluster** should have `istio.primary: true`. That cluster's Composition creates the `istio-ca` Certificate and ClusterIssuer on the management cluster. All other clusters set `primary: false` and receive the CA via Crossplane namespace references.
 
-### OIDC / IRSA — Auto-Derived
+### OIDC / IRSA - Auto-Derived
 
-The `agones` package creates an IAM Role for the `agones-sdk` ServiceAccount (IRSA) so game server pods can call AWS APIs (e.g. S3 for replays). The OIDC issuer URL for this trust policy is **read automatically** from `status.atProvider.identity[0].oidc[0].issuer` of the EKS cluster — you do not need to specify it in the claim.
+The `agones` package creates an IAM Role for the `agones-sdk` ServiceAccount (IRSA) so game server pods can call AWS APIs (e.g. S3 for replays). The OIDC issuer URL for this trust policy is **read automatically** from `status.atProvider.identity[0].oidc[0].issuer` of the EKS cluster - you do not need to specify it in the claim.
 
 The flow across reconcile cycles:
-1. **Cycle 1** — EKS cluster is created; OIDC issuer appears in its status.
-2. **Cycle 2** — `eks-cluster` composition reads the issuer URL, strips `https://`, and passes it as `oidc` to the `XAgonesCluster` nested XR.
-3. **Cycle 2** — `agones` composition creates the `<id>-role-agones-sdk` IAM Role with the correct OIDC federated trust policy.
+1. **Cycle 1** - EKS cluster is created; OIDC issuer appears in its status.
+2. **Cycle 2** - `eks-cluster` composition reads the issuer URL, strips `https://`, and passes it as `oidc` to the `XAgonesCluster` nested XR.
+3. **Cycle 2** - `agones` composition creates the `<id>-role-agones-sdk` IAM Role with the correct OIDC federated trust policy.
 
 The `oidc` field still exists in the `agones` XRD as an optional override for cases where an existing role or a specific issuer URL must be used.
 
 ### Agones Multi-Cluster Allocation Flow
 
-The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It calls the local agones-allocator service. Istio intercepts the call on the sidecar and, based on the `mesh-region` header, routes it to the appropriate regional allocator — either locally or across clusters via the east-west gateway.
+The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It calls the local agones-allocator service. Istio intercepts the call on the sidecar and, based on the `mesh-region` header, routes it to the appropriate regional allocator - either locally or across clusters via the east-west gateway.
 
 ```
   us-east-1 cluster
@@ -462,19 +462,19 @@ grpc_cli call \
 ### Why auto-provisioned VPC per cluster?
 
 Requiring the operator to pre-create a VPC and copy subnet IDs into the claim adds a manual step that breaks GitOps workflows. Each cluster getting its own VPC via the `vpc` package means:
-- **One claim → full environment** — no out-of-band Terraform prerequisites
-- **Non-overlapping CIDRs by design** — `10.100.0.0/16` for eu-west-1, `10.110.0.0/16` for us-east-1 — enables Transit Gateway peering without re-addressing
-- **Subnet tags set correctly from the start** — `karpenter.sh/subnetzone` is applied at creation so Karpenter can immediately select subnets without extra tagging steps
+- **One claim → full environment** - no out-of-band Terraform prerequisites
+- **Non-overlapping CIDRs by design** - `10.100.0.0/16` for eu-west-1, `10.110.0.0/16` for us-east-1 - enables Transit Gateway peering without re-addressing
+- **Subnet tags set correctly from the start** - `karpenter.sh/subnetzone` is applied at creation so Karpenter can immediately select subnets without extra tagging steps
 
-To use an existing VPC, set `vpcId`, `subnetIds`, `subnetPrivateIds`, and `subnetPublicIds` in the claim — the VPC creation step is skipped entirely.
+To use an existing VPC, set `vpcId`, `subnetIds`, `subnetPrivateIds`, and `subnetPublicIds` in the claim - the VPC creation step is skipped entirely.
 
 ### Why OIDC auto-derived instead of specified in the claim?
 
-The OIDC issuer URL (`oidc.eks.<region>.amazonaws.com/id/<hash>`) is generated by AWS when the EKS cluster is created — it cannot be known before the cluster exists. Requiring it in the claim means a two-step process: apply the claim, wait for EKS to create, look up the OIDC URL, add it to the claim, re-apply. Auto-derivation from `status.atProvider.identity` eliminates that loop — Crossplane's reconciler reads the value on the second cycle and creates the IAM Role automatically.
+The OIDC issuer URL (`oidc.eks.<region>.amazonaws.com/id/<hash>`) is generated by AWS when the EKS cluster is created - it cannot be known before the cluster exists. Requiring it in the claim means a two-step process: apply the claim, wait for EKS to create, look up the OIDC URL, add it to the claim, re-apply. Auto-derivation from `status.atProvider.identity` eliminates that loop - Crossplane's reconciler reads the value on the second cycle and creates the IAM Role automatically.
 
 ### Why `primary: true` on exactly one cluster?
 
-The shared Istio root CA must be created once. In a real production setup this is typically done by Terraform before any EKS clusters exist. The `primary: true` flag gives you the same result declaratively — Crossplane creates the CA Certificate on the management cluster's cert-manager. All cluster-level `istio` packages then reference it via `namespace/secret` path.
+The shared Istio root CA must be created once. In a real production setup this is typically done by Terraform before any EKS clusters exist. The `primary: true` flag gives you the same result declaratively - Crossplane creates the CA Certificate on the management cluster's cert-manager. All cluster-level `istio` packages then reference it via `namespace/secret` path.
 
 If you have an existing CA (from Terraform or another PKI), set `primary: false` on all clusters and create the `istio-ca` Secret in cert-manager manually before applying any claims.
 
@@ -482,8 +482,8 @@ If you have an existing CA (from Terraform or another PKI), set `primary: false`
 
 The `eks-cluster` Composition creates `XVPC`, `XAgonesCluster` and `XIstio` composite resources inline. This means:
 - **One `kubectl apply`** provisions everything
-- **Lifecycle is tied** — deleting the cluster claim cascades to VPC, Agones, and Istio resources
-- **Parameters flow down** — the EKS cluster endpoint, CA data, and OIDC issuer discovered by Crossplane are passed automatically to child packages (no manual copy step)
+- **Lifecycle is tied** - deleting the cluster claim cascades to VPC, Agones, and Istio resources
+- **Parameters flow down** - the EKS cluster endpoint, CA data, and OIDC issuer discovered by Crossplane are passed automatically to child packages (no manual copy step)
 
 ### Why `portName: http-rest` on the Agones allocator service?
 
@@ -499,10 +499,10 @@ service:
 
 ### Why `AUTO_PASSTHROUGH` on the east-west gateway?
 
-The east-west gateway uses SNI routing — it reads the TLS SNI field to determine which backend service to forward to, without terminating the TLS session. This means:
+The east-west gateway uses SNI routing - it reads the TLS SNI field to determine which backend service to forward to, without terminating the TLS session. This means:
 - The allocator's mTLS identity is preserved end-to-end
 - No certificate pinning issues
-- The gateway configuration is static — it works for any service, not just Agones
+- The gateway configuration is static - it works for any service, not just Agones
 
 ---
 
@@ -538,7 +538,7 @@ retries:
 timeout: 6s
 ```
 
-`retryRemoteLocalities: true` is what enables automatic failover — if the target regional allocator returns a retryable error (no servers available, connection refused), Envoy retries against other subsets.
+`retryRemoteLocalities: true` is what enables automatic failover - if the target regional allocator returns a retryable error (no servers available, connection refused), Envoy retries against other subsets.
 
 ---
 
@@ -546,13 +546,13 @@ timeout: 6s
 
 ### VPC CIDR planning
 
-The two clusters use non-overlapping /16 blocks (`10.100.0.0/16` and `10.110.0.0/16`). This is intentional — it enables AWS Transit Gateway peering between the VPCs if you want private east-west gateway connectivity without routing through the internet. Add further clusters on `10.120.0.0/16`, `10.130.0.0/16`, etc.
+The two clusters use non-overlapping /16 blocks (`10.100.0.0/16` and `10.110.0.0/16`). This is intentional - it enables AWS Transit Gateway peering between the VPCs if you want private east-west gateway connectivity without routing through the internet. Add further clusters on `10.120.0.0/16`, `10.130.0.0/16`, etc.
 
 ### Network connectivity between clusters
 
 The east-west gateways communicate over the internet (or via Transit Gateway if you prefer private routing). The NLBs are internal by default in this configuration (`aws-load-balancer-scheme: internal`). For cross-region connectivity you need either:
 
-- AWS Transit Gateway connecting both VPCs (recommended — keeps traffic on AWS backbone)
+- AWS Transit Gateway connecting both VPCs (recommended - keeps traffic on AWS backbone)
 - Or change `aws-load-balancer-scheme: internet-facing` and restrict with security groups
 
 ### Karpenter node consolidation for game servers
@@ -567,11 +567,11 @@ template:
     expireAfter: Never            # Don't force-cycle running nodes
 ```
 
-`WhenEmpty` is critical — `WhenUnderutilized` would evict game server pods mid-session.
+`WhenEmpty` is critical - `WhenUnderutilized` would evict game server pods mid-session.
 
 ### cert-manager CA rotation
 
-The Istio root CA has a 10-year validity with 30-day renewal notice. cert-manager handles rotation automatically. When the CA rotates, istiod picks up the new `cacerts` secret on the next reconciliation cycle — workload certificates are re-issued transparently.
+The Istio root CA has a 10-year validity with 30-day renewal notice. cert-manager handles rotation automatically. When the CA rotates, istiod picks up the new `cacerts` secret on the next reconciliation cycle - workload certificates are re-issued transparently.
 
 ---
 
