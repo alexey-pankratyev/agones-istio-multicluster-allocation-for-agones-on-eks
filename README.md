@@ -1,6 +1,6 @@
 # Multi-Region Game Server Allocation on EKS with Agones and Istio
 
-> **TL;DR** - Two Crossplane claims. Two EKS clusters. One Istio mesh. A matchmaker that only needs a single gRPC endpoint to allocate game servers across regions.
+> This project deploys a multi-region game server infrastructure on Amazon EKS using Crossplane — a single claim per region provisions the full stack: VPC with public and private subnets, EKS, Agones allocator, Karpenter SPOT node pools, and an Istio multi-primary mesh — with OIDC/IRSA roles derived automatically from cluster status; two clusters form one Istio mesh with a shared mTLS root CA and east-west gateways for cross-cluster traffic; the matchmaker calls a single local gRPC endpoint — Istio routes allocation requests by `mesh-region` header and retries across regions on failure, no per-region endpoint logic required in application code.
 
 ---
 
@@ -28,7 +28,7 @@ The solution here: Agones multi-cluster allocation routed by an Istio service me
 │   │   ├── definition.yaml   # XRD: KubernetesCluster API
 │   │   ├── aws.yaml          # Composition: vpc → eks-cluster → agones → istio
 │   │   └── crossplane.yaml
-│   ├── agones/               # Agones HA allocator + Karpenter game server pools
+│   ├── agones/               # Agones allocator + Karpenter game server pools
 │   │   ├── definition.yaml   # XRD: AgonesCluster API
 │   │   ├── aws.yaml          # Composition: Agones Helm + NodePools + IRSA role
 │   │   └── crossplane.yaml
