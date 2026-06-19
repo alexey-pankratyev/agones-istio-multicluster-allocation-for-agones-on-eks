@@ -1,0 +1,22 @@
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: demo-gameserver
+  namespace: agones-gameservers
+spec:
+  replicas: 3
+  template:
+    spec:
+      ports:
+      - name: default
+        containerPort: 7777
+      template:
+        spec:
+          tolerations:
+          - key: agones.dev/agones-gameservers-arm64
+            operator: Equal
+            value: "true"
+            effect: NoExecute
+          containers:
+          - name: server
+            image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34

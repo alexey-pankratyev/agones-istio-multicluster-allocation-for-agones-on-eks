@@ -109,6 +109,12 @@ spec:
           {{- /* Cluster endpoint and CA — used for Istio XIstio nested XR */ -}}
           {{- $endpoint := index $eksAtProvider "endpoint" | default "" }}
           {{- $caData := index $eksAtProvider "certificateAuthority" | default list | first | default dict | dig "data" "" }}
+
+          {{- /* VPC ID — from explicit param or from EKS cluster vpcConfig status */ -}}
+          {{- $vpcId := get $params "vpcId" | default "" }}
+          {{- if not $vpcId }}
+            {{- $vpcId = index $eksAtProvider "vpcConfig" | default dict | dig "vpcId" "" }}
+          {{- end }}
           ---
           # EKS control-plane IAM role
           apiVersion: iam.aws.upbound.io/v1beta1
@@ -348,7 +354,6 @@ spec:
           {{- if $clusterSgId }}
           ---
           # Security group rule: Agones game server UDP port range
-          # Applied to the EKS-managed cluster security group once it appears in cluster status.
           apiVersion: ec2.aws.upbound.io/v1beta1
           kind: SecurityGroupRule
           metadata:
@@ -362,6 +367,40 @@ spec:
               fromPort: 7000
               toPort: 8000
               protocol: udp
+              type: ingress
+              securityGroupId: {{ $clusterSgId }}
+          ---
+          # Security group rule: Istio east-west gateway port (cross-cluster mTLS tunnel)
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: SecurityGroupRule
+          metadata:
+            name: {{ $id }}-sgr-istio-eastwest
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-sgr-istio-eastwest
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              cidrBlocks: ["0.0.0.0/0"]
+              fromPort: 15443
+              toPort: 15443
+              protocol: tcp
+              type: ingress
+              securityGroupId: {{ $clusterSgId }}
+          ---
+          # Security group rule: Istio east-west gateway health check port
+          apiVersion: ec2.aws.upbound.io/v1beta1
+          kind: SecurityGroupRule
+          metadata:
+            name: {{ $id }}-sgr-istio-eastwest-health
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-sgr-istio-eastwest-health
+          spec:
+            forProvider:
+              region: {{ $params.region }}
+              cidrBlocks: ["0.0.0.0/0"]
+              fromPort: 15021
+              toPort: 15021
+              protocol: tcp
               type: ingress
               securityGroupId: {{ $clusterSgId }}
           {{- end }}
@@ -473,6 +512,91 @@ spec:
                 name: {{ $id }}
               addonName: aws-ebs-csi-driver
               addonVersion: {{ $params.ebsCsiDriverAddonVersion | default "v1.56.0-eksbuild.1" }}
+          {{- if $oidc }}
+          ---
+          # IAM Role for aws-load-balancer-controller (IRSA)
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Role
+          metadata:
+            name: {{ $id }}-aws-lbc
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-role-aws-lbc
+          spec:
+            forProvider:
+              assumeRolePolicy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Federated": "arn:aws:iam::{{ $params.awsAccountNumber }}:oidc-provider/{{ $oidc }}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                      "StringEquals": {
+                        "{{ $oidc }}:aud": "sts.amazonaws.com",
+                        "{{ $oidc }}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+                      }
+                    }
+                  }]
+                }
+          ---
+          # aws-load-balancer-controller needs broad ELB + EC2 permissions.
+          # Using the official AWS managed policy to avoid maintaining a permission list.
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: RolePolicyAttachment
+          metadata:
+            name: {{ $id }}-aws-lbc-elb-full
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-aws-lbc-elb-full
+          spec:
+            forProvider:
+              policyArn: arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess
+              roleRef:
+                name: {{ $id }}-aws-lbc
+          ---
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: RolePolicyAttachment
+          metadata:
+            name: {{ $id }}-aws-lbc-ec2-ro
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-aws-lbc-ec2-ro
+          spec:
+            forProvider:
+              policyArn: arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+              roleRef:
+                name: {{ $id }}-aws-lbc
+          {{- end }}
+          ---
+          # aws-load-balancer-controller — provisions NLBs and ALBs via Service/Ingress annotations
+          apiVersion: helm.crossplane.io/v1beta1
+          kind: Release
+          metadata:
+            name: {{ $id }}-aws-lbc
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-aws-lbc
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-helm
+            forProvider:
+              chart:
+                name: aws-load-balancer-controller
+                repository: https://aws.github.io/eks-charts
+                version: "1.13.0"
+              namespace: kube-system
+              values:
+                clusterName: {{ $id }}
+                region: {{ $params.region }}
+                {{- if $vpcId }}
+                vpcId: {{ $vpcId }}
+                {{- end }}
+                serviceAccount:
+                  name: aws-load-balancer-controller
+                  annotations:
+                    eks.amazonaws.com/role-arn: "arn:aws:iam::{{ $params.awsAccountNumber }}:role/{{ $id }}-aws-lbc"
+                tolerations:
+                - key: CriticalAddonsOnly
+                  operator: Exists
           ---
           # Karpenter — node autoscaler for game server and Istio node pools
           apiVersion: helm.crossplane.io/v1beta1

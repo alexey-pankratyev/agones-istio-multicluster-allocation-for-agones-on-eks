@@ -16,7 +16,9 @@ PACKAGES := packages/vpc packages/agones packages/istio packages/eks-cluster
 
 .PHONY: help deploy install-packages create-namespace apply-claims \
         delete-claims delete-packages delete teardown \
-        status trace-eu trace-us kubeconfig-eu kubeconfig-us check-prereqs
+        status trace-eu trace-us kubeconfig-eu kubeconfig-us check-prereqs \
+        deploy-fleet alloc-local-eu alloc-local-us verify-mesh verify-allocation \
+        alloc-cross-eu-to-us alloc-cross-us-to-eu test-pod-eu test-pod-us
 
 help:
 	@echo ""
@@ -37,6 +39,17 @@ help:
 	@echo "    make trace-us                   # crossplane trace us-east-1"
 	@echo "    make kubeconfig-eu              # write /tmp/eu-west-1.kubeconfig"
 	@echo "    make kubeconfig-us              # write /tmp/us-east-1.kubeconfig"
+	@echo ""
+	@echo "  Testing:"
+	@echo "    make deploy-fleet               # deploy demo Fleet on both clusters"
+	@echo "    make verify-mesh                # check Istio remote cluster discovery + shared CA"
+	@echo "    make alloc-local-eu             # allocate a GameServer locally on eu-west-1"
+	@echo "    make alloc-local-us             # allocate a GameServer locally on us-east-1"
+	@echo "    make verify-allocation          # deploy-fleet + local alloc on both clusters"
+	@echo "    make test-pod-eu                # start a test pod with Istio sidecar on eu-west-1"
+	@echo "    make test-pod-us                # start a test pod with Istio sidecar on us-east-1"
+	@echo "    make alloc-cross-eu-to-us       # cross-cluster alloc: eu-west-1 pod → us-east-1 allocator"
+	@echo "    make alloc-cross-us-to-eu       # cross-cluster alloc: us-east-1 pod → eu-west-1 allocator"
 	@echo ""
 	@echo "  Teardown:"
 	@echo "    make delete-claims              # delete KubernetesCluster claims"
@@ -135,6 +148,153 @@ kubeconfig-us:
 		-o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/us-east-1.kubeconfig
 	@echo "Kubeconfig written to /tmp/us-east-1.kubeconfig"
 	@echo "  KUBECONFIG=/tmp/us-east-1.kubeconfig kubectl get nodes"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+deploy-fleet: kubeconfig-eu kubeconfig-us
+	@echo "==> Deploying demo Fleet on eu-west-1..."
+	@kubectl apply --kubeconfig=/tmp/eu-west-1.kubeconfig -f examples/fleet.yaml
+	@echo "==> Deploying demo Fleet on us-east-1..."
+	@kubectl apply --kubeconfig=/tmp/us-east-1.kubeconfig -f examples/fleet.yaml
+	@echo ""
+	@echo "    Waiting for GameServers to become Ready (~30s)..."
+	@sleep 30
+	@echo ""
+	@echo "==> eu-west-1 GameServers:"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/eu-west-1.kubeconfig 2>/dev/null
+	@echo ""
+	@echo "==> us-east-1 GameServers:"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/us-east-1.kubeconfig 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+alloc-local-eu: kubeconfig-eu
+	@echo "==> Allocating a GameServer on eu-west-1..."
+	@kubectl create --kubeconfig=/tmp/eu-west-1.kubeconfig -f examples/allocation-local.yaml
+	@echo ""
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/eu-west-1.kubeconfig
+
+alloc-local-us: kubeconfig-us
+	@echo "==> Allocating a GameServer on us-east-1..."
+	@kubectl create --kubeconfig=/tmp/us-east-1.kubeconfig -f examples/allocation-local.yaml
+	@echo ""
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/us-east-1.kubeconfig
+
+# ─────────────────────────────────────────────────────────────────────────────
+verify-mesh: kubeconfig-eu kubeconfig-us
+	@echo "==> Remote cluster discovery (eu-west-1 sees us-east-1):"
+	@istioctl remote-clusters --kubeconfig=/tmp/eu-west-1.kubeconfig 2>/dev/null || \
+		echo "    istioctl not found — install from https://istio.io/latest/docs/setup/getting-started/"
+	@echo ""
+	@echo "==> Remote cluster discovery (us-east-1 sees eu-west-1):"
+	@istioctl remote-clusters --kubeconfig=/tmp/us-east-1.kubeconfig 2>/dev/null || true
+	@echo ""
+	@echo "==> Shared root CA fingerprint — both lines must match:"
+	@echo -n "    eu-west-1: " && \
+		kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/eu-west-1.kubeconfig \
+		-o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | base64 -d | openssl x509 -noout -fingerprint 2>/dev/null \
+		|| echo "(cacerts not found)"
+	@echo -n "    us-east-1: " && \
+		kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/us-east-1.kubeconfig \
+		-o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | base64 -d | openssl x509 -noout -fingerprint 2>/dev/null \
+		|| echo "(cacerts not found)"
+	@echo ""
+	@echo "==> East-west gateway NLB addresses:"
+	@echo -n "    eu-west-1: " && \
+		kubectl get svc gameserver-eu-west-1-istio-eastwestgateway -n istio-system \
+		--kubeconfig=/tmp/eu-west-1.kubeconfig \
+		-o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "(pending)"
+	@echo ""
+	@echo -n "    us-east-1: " && \
+		kubectl get svc gameserver-us-east-1-istio-eastwestgateway -n istio-system \
+		--kubeconfig=/tmp/us-east-1.kubeconfig \
+		-o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "(pending)"
+	@echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+verify-allocation: deploy-fleet alloc-local-eu alloc-local-us
+	@echo ""
+	@echo "==> Final GameServer state on eu-west-1 (one should be Allocated):"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/eu-west-1.kubeconfig 2>/dev/null
+	@echo ""
+	@echo "==> Final GameServer state on us-east-1 (one should be Allocated):"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/us-east-1.kubeconfig 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-cluster allocation test — runs inside a pod WITH Istio sidecar.
+#
+# The pod lives in agones-system (Istio injection enabled). Envoy intercepts
+# the outbound call to agones-allocator:443 and, based on the mesh-region
+# header, routes it through the east-west gateway to the remote cluster.
+# The allocator responds with a GameServer from that cluster.
+#
+# Prerequisites: make deploy-fleet must have been run first.
+# ─────────────────────────────────────────────────────────────────────────────
+test-pod-eu: kubeconfig-eu
+	@echo "==> Starting test pod on eu-west-1 (agones-system, Istio sidecar injected)..."
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig delete pod allocator-test \
+		-n agones-system --ignore-not-found 2>/dev/null; true
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig apply -f examples/test-pod.yaml
+	@echo "    Waiting for pod to be ready (~20s for sidecar injection)..."
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig wait pod allocator-test \
+		-n agones-system --for=condition=Ready --timeout=60s
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig get pod allocator-test -n agones-system
+
+test-pod-us: kubeconfig-us
+	@echo "==> Starting test pod on us-east-1 (agones-system, Istio sidecar injected)..."
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig delete pod allocator-test \
+		-n agones-system --ignore-not-found 2>/dev/null; true
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig apply -f examples/test-pod.yaml
+	@echo "    Waiting for pod to be ready (~20s for sidecar injection)..."
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig wait pod allocator-test \
+		-n agones-system --for=condition=Ready --timeout=60s
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig get pod allocator-test -n agones-system
+
+# ─────────────────────────────────────────────────────────────────────────────
+ALLOC_PAYLOAD := {"namespace":"agones-gameservers","gameServerSelectors":[{"matchLabels":{"agones.dev/fleet":"demo-gameserver"}}]}
+
+alloc-cross-eu-to-us: kubeconfig-eu
+	@echo "==> Cross-cluster allocation: eu-west-1 pod → us-east-1 allocator"
+	@echo "    Istio routes the request via east-west gateway based on mesh-region header."
+	@echo ""
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig exec -n agones-system allocator-test -- \
+		curl -s --max-time 15 \
+		-X POST \
+		http://agones-allocator.agones-system.svc.cluster.local:443/gameserverallocation \
+		-H "mesh-region: us-east-1" \
+		-H "Content-Type: application/json" \
+		-d '$(ALLOC_PAYLOAD)' | python3 -m json.tool 2>/dev/null || \
+		kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig exec -n agones-system allocator-test -- \
+		curl -s --max-time 15 \
+		-X POST \
+		http://agones-allocator.agones-system.svc.cluster.local:443/gameserverallocation \
+		-H "mesh-region: us-east-1" \
+		-H "Content-Type: application/json" \
+		-d '$(ALLOC_PAYLOAD)'
+	@echo ""
+	@echo "==> us-east-1 GameServers (one should now be Allocated):"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/us-east-1.kubeconfig 2>/dev/null
+
+alloc-cross-us-to-eu: kubeconfig-us
+	@echo "==> Cross-cluster allocation: us-east-1 pod → eu-west-1 allocator"
+	@echo "    Istio routes the request via east-west gateway based on mesh-region header."
+	@echo ""
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig exec -n agones-system allocator-test -- \
+		curl -s --max-time 15 \
+		-X POST \
+		http://agones-allocator.agones-system.svc.cluster.local:443/gameserverallocation \
+		-H "mesh-region: eu-west-1" \
+		-H "Content-Type: application/json" \
+		-d '$(ALLOC_PAYLOAD)' | python3 -m json.tool 2>/dev/null || \
+		kubectl --kubeconfig=/tmp/us-east-1.kubeconfig exec -n agones-system allocator-test -- \
+		curl -s --max-time 15 \
+		-X POST \
+		http://agones-allocator.agones-system.svc.cluster.local:443/gameserverallocation \
+		-H "mesh-region: eu-west-1" \
+		-H "Content-Type: application/json" \
+		-d '$(ALLOC_PAYLOAD)'
+	@echo ""
+	@echo "==> eu-west-1 GameServers (one should now be Allocated):"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/eu-west-1.kubeconfig 2>/dev/null
 
 # ─────────────────────────────────────────────────────────────────────────────
 delete-claims:

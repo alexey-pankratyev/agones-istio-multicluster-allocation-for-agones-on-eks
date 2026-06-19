@@ -810,12 +810,17 @@ spec:
                       mesh-region: {{ $params.region }}
                   {{- range $i := $multicluster.rules }}
                   {{- if and $i.clusterName $i.region }}
+                  {{- $remoteGwSa := printf "%s-istio-eastwestgateway" $i.clusterName }}
+                  {{- $remoteIstioNs := $i.istioNamespace | default "istio-system" }}
                   - name: {{ $i.region }}
                     labels:
                       mesh-region: {{ $i.region }}
                     trafficPolicy:
                       tls:
                         mode: ISTIO_MUTUAL
+                        subjectAltNames:
+                        - spiffe://cluster.local/ns/{{ $remoteIstioNs }}/sa/{{ $remoteGwSa }}
+                        - spiffe://cluster.local/ns/agones-system/sa/agones-allocator
                       outlierDetection:
                         consecutiveErrors: 5
                         interval: 30s

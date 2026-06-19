@@ -1,0 +1,17 @@
+# Allocate a GameServer from the local cluster.
+# Apply this to either cluster to test local allocation.
+#
+#   make alloc-local-eu    # allocate on eu-west-1
+#   make alloc-local-us    # allocate on us-east-1
+#
+# Check the result:
+#   KUBECONFIG=/tmp/eu-west-1.kubeconfig kubectl get gameserver -n agones-gameservers
+apiVersion: allocation.agones.dev/v1
+kind: GameServerAllocation
+metadata:
+  generateName: local-alloc-
+  namespace: agones-gameservers
+spec:
+  selectors:
+  - matchLabels:
+      agones.dev/fleet: demo-gameserver

@@ -372,50 +372,95 @@ kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/eu-west-1.kubeconfi
   -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
 ```
 
-### Deploy a Fleet and test allocation
+### Test allocation
+
+The `examples/` directory contains ready-to-use manifests for testing:
+
+| File | Purpose |
+|---|---|
+| `examples/fleet.yaml` | 3-replica Fleet of `simple-game-server` pods |
+| `examples/allocation-local.yaml` | `GameServerAllocation` that picks a Ready server from the local cluster |
+| `examples/test-pod.yaml` | `nicolaka/netshoot` pod with Istio sidecar — used for cross-cluster allocation tests |
+
+#### Local allocation
+
+Deploy the Fleet and verify both clusters allocate locally:
 
 ```bash
-# Deploy game servers on both clusters
-for KC in /tmp/us-east-1.kubeconfig /tmp/eu-west-1.kubeconfig; do
-  kubectl apply --kubeconfig=$KC -f - <<EOF
-apiVersion: agones.dev/v1
-kind: Fleet
-metadata:
-  name: demo-gameserver
-  namespace: agones-gameservers
-spec:
-  replicas: 5
-  template:
-    spec:
-      ports:
-      - name: default
-        containerPort: 7777
-      template:
-        spec:
-          tolerations:
-          - key: agones.dev/agones-gameservers-arm64
-            operator: Equal
-            value: "true"
-            effect: NoExecute
-          containers:
-          - name: server
-            image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34
-EOF
-done
-
-# Test cross-region allocation: run a client on us-east-1, target eu-west-1
-kubectl run allocator-test --kubeconfig=/tmp/us-east-1.kubeconfig \
-  --image=ghcr.io/googleforgames/agones/allocator:1.55.0 \
-  --restart=Never --rm -it -- /bin/sh
-
-# Inside the pod — the mesh-region header tells Istio which cluster to route to:
-grpc_cli call \
-  agones-allocator.agones-system.svc.cluster.local:443 \
-  agones.dev.Allocator.Allocate \
-  "namespace: 'agones-gameservers', multi_cluster_setting: {enabled: true}" \
-  --metadata "mesh-region:eu-west-1"
-# Returns a GameServer from the eu-west-1 cluster
+make deploy-fleet          # deploy Fleet on both clusters, wait for Ready
+make alloc-local-eu        # allocate one GameServer on eu-west-1
+make alloc-local-us        # allocate one GameServer on us-east-1
 ```
+
+Or all at once:
+
+```bash
+make verify-allocation     # deploy-fleet + alloc-local-eu + alloc-local-us
+```
+
+Expected output — one GameServer transitions from `Ready` to `Allocated`:
+
+```
+NAME                          STATE       ADDRESS                                      PORT
+demo-gameserver-xxxxx-aaaaa   Allocated   ec2-1-2-3-4.eu-west-1.compute.amazonaws.com  7833
+demo-gameserver-xxxxx-bbbbb   Ready       ec2-1-2-3-4.eu-west-1.compute.amazonaws.com  7585
+demo-gameserver-xxxxx-ccccc   Ready       ec2-1-2-3-4.eu-west-1.compute.amazonaws.com  7270
+```
+
+#### Cross-cluster allocation via Istio mesh
+
+This is the main scenario — a pod on eu-west-1 allocates a GameServer **on us-east-1** by setting the `mesh-region` header. Envoy intercepts the outbound call to `agones-allocator:443`, matches the header in the VirtualService, and routes it through the east-west gateway NLB to the remote cluster's allocator.
+
+```
+eu-west-1 pod
+  └─ curl http://agones-allocator:443/gameserverallocation  (Header: mesh-region: us-east-1)
+       └─ Envoy sidecar (eu-west-1)  →  mTLS  →  east-west gateway NLB (us-east-1):15443
+                                                      └─ AUTO_PASSTHROUGH (SNI routing)
+                                                           └─ agones-allocator pod (us-east-1)
+                                                                └─ {"gameServerName": "...", "address": "ec2-44-...compute-1.amazonaws.com"}
+```
+
+**Prerequisites:** the test pod must run inside the `agones-system` namespace (where Istio injection is enabled) so it gets an Envoy sidecar that knows the VirtualService rules.
+
+```bash
+# Start the test pod with Istio sidecar on eu-west-1
+make test-pod-eu
+
+# Allocate from eu-west-1 — routed to us-east-1 via east-west gateway
+make alloc-cross-eu-to-us
+```
+
+Expected output — the returned `address` is a us-east-1 EC2 hostname:
+
+```json
+{
+  "gameServerName": "demo-gameserver-xxxxx-yyyyy",
+  "ports": [{"name": "default", "port": 7114}],
+  "address": "ec2-44-211-153-196.compute-1.amazonaws.com",
+  "source": "local"
+}
+```
+
+And on us-east-1 you can confirm the GameServer is now `Allocated`:
+
+```bash
+KUBECONFIG=/tmp/us-east-1.kubeconfig kubectl get gameserver -n agones-gameservers
+```
+
+The reverse direction works identically:
+
+```bash
+make test-pod-us           # start test pod on us-east-1
+make alloc-cross-us-to-eu  # allocate from us-east-1 → eu-west-1
+```
+
+#### Verify the Istio mesh
+
+```bash
+make verify-mesh
+```
+
+This checks: remote cluster discovery (`istiod` synced state), shared root CA fingerprint (must match on both clusters), and east-west gateway NLB addresses.
 
 ### Teardown
 
