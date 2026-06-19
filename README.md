@@ -454,6 +454,34 @@ make test-pod-us           # start test pod on us-east-1
 make alloc-cross-us-to-eu  # allocate from us-east-1 → eu-west-1
 ```
 
+**Manual curl** — if you want to run the request by hand, exec into the test pod and fire the call directly:
+
+```bash
+# Start the test pod first
+make test-pod-eu
+
+# Then exec in and run curl yourself
+kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig exec -n agones-system allocator-test -- \
+  curl -s -X POST \
+  http://agones-allocator.agones-system.svc.cluster.local:443/gameserverallocation \
+  -H "mesh-region: us-east-1" \
+  -H "Content-Type: application/json" \
+  -d '{"namespace":"agones-gameservers","gameServerSelectors":[{"matchLabels":{"agones.dev/fleet":"demo-gameserver"}}]}' \
+  | python3 -m json.tool
+```
+
+Change `mesh-region: us-east-1` to `mesh-region: eu-west-1` to allocate locally instead.
+
+#### Resetting GameServers between test runs
+
+After each allocation the GameServer stays in `Allocated` state until you delete it. When all servers are allocated, the next request returns `there is no available GameServer to allocate`. To reset:
+
+```bash
+make reset-fleet
+```
+
+This force-deletes all `Allocated` GameServers on both clusters (`--force --grace-period=0`) and re-applies the Fleet so fresh `Ready` servers spin up. Run this between test runs to get a clean slate.
+
 #### Verify the Istio mesh
 
 ```bash

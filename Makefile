@@ -17,7 +17,7 @@ PACKAGES := packages/vpc packages/agones packages/istio packages/eks-cluster
 .PHONY: help deploy install-packages create-namespace apply-claims \
         delete-claims delete-packages delete teardown \
         status trace-eu trace-us kubeconfig-eu kubeconfig-us check-prereqs \
-        deploy-fleet alloc-local-eu alloc-local-us verify-mesh verify-allocation \
+        deploy-fleet reset-fleet alloc-local-eu alloc-local-us verify-mesh verify-allocation \
         alloc-cross-eu-to-us alloc-cross-us-to-eu test-pod-eu test-pod-us
 
 help:
@@ -42,6 +42,7 @@ help:
 	@echo ""
 	@echo "  Testing:"
 	@echo "    make deploy-fleet               # deploy demo Fleet on both clusters"
+	@echo "    make reset-fleet                # delete Allocated GameServers + redeploy Fleet"
 	@echo "    make verify-mesh                # check Istio remote cluster discovery + shared CA"
 	@echo "    make alloc-local-eu             # allocate a GameServer locally on eu-west-1"
 	@echo "    make alloc-local-us             # allocate a GameServer locally on us-east-1"
@@ -157,6 +158,30 @@ deploy-fleet: kubeconfig-eu kubeconfig-us
 	@echo "==> Deploying demo Fleet on us-east-1..."
 	@kubectl apply --kubeconfig=/tmp/us-east-1.kubeconfig -f examples/fleet.yaml
 	@echo ""
+	@echo "    Waiting for GameServers to become Ready (~30s)..."
+	@sleep 30
+	@echo ""
+	@echo "==> eu-west-1 GameServers:"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/eu-west-1.kubeconfig 2>/dev/null
+	@echo ""
+	@echo "==> us-east-1 GameServers:"
+	@kubectl get gameserver -n agones-gameservers --kubeconfig=/tmp/us-east-1.kubeconfig 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+reset-fleet: kubeconfig-eu kubeconfig-us
+	@echo "==> Deleting Allocated GameServers on eu-west-1..."
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig get gameserver -n agones-gameservers \
+		-o jsonpath='{range .items[?(@.status.state=="Allocated")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+		xargs -r -I{} kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig delete gameserver {} \
+		-n agones-gameservers --force --grace-period=0 2>/dev/null || true
+	@echo "==> Deleting Allocated GameServers on us-east-1..."
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig get gameserver -n agones-gameservers \
+		-o jsonpath='{range .items[?(@.status.state=="Allocated")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+		xargs -r -I{} kubectl --kubeconfig=/tmp/us-east-1.kubeconfig delete gameserver {} \
+		-n agones-gameservers --force --grace-period=0 2>/dev/null || true
+	@echo "==> Redeploying Fleet on both clusters..."
+	@kubectl --kubeconfig=/tmp/eu-west-1.kubeconfig apply -f examples/fleet.yaml
+	@kubectl --kubeconfig=/tmp/us-east-1.kubeconfig apply -f examples/fleet.yaml
 	@echo "    Waiting for GameServers to become Ready (~30s)..."
 	@sleep 30
 	@echo ""

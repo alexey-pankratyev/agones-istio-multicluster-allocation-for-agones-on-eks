@@ -768,10 +768,10 @@ spec:
               istio:
                 enabled: {{ $istioEnabled }}
               replicas:
-                allocator: {{ index (index $agones "replicas" | default dict) "allocator" | default 3 }}
-                controller: {{ index (index $agones "replicas" | default dict) "controller" | default 3 }}
-                extensions: {{ index (index $agones "replicas" | default dict) "extensions" | default 2 }}
-                ping: 2
+                allocator: {{ index (index $agones "replicas" | default dict) "allocator" | default 1 }}
+                controller: {{ index (index $agones "replicas" | default dict) "controller" | default 1 }}
+                extensions: {{ index (index $agones "replicas" | default dict) "extensions" | default 1 }}
+                ping: 1
               {{- if index $agones "karpenterNodePools" }}
               karpenterNodePools: {{ index $agones "karpenterNodePools" | toJson }}
               {{- end }}

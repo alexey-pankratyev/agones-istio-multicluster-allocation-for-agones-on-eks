@@ -186,13 +186,13 @@ spec:
                         properties:
                           allocator:
                             type: integer
-                            default: 3
+                            default: 1
                           controller:
                             type: integer
-                            default: 3
+                            default: 1
                           extensions:
                             type: integer
-                            default: 2
+                            default: 1
                       vpcSubnetSelectorPublic:
                         description: |
                           Karpenter subnet selector tag for game server nodes.

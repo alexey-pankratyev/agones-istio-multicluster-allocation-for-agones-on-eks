@@ -44,16 +44,16 @@ spec:
                     properties:
                       allocator:
                         type: integer
-                        default: 3
+                        default: 1
                       controller:
                         type: integer
-                        default: 3
+                        default: 1
                       extensions:
                         type: integer
-                        default: 2
+                        default: 1
                       ping:
                         type: integer
-                        default: 2
+                        default: 1
                   region:
                     type: string
                   awsAccountNumber:
