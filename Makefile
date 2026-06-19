@@ -392,10 +392,13 @@ alloc-cross-us-to-eu: kubeconfig-us
 
 # ─────────────────────────────────────────────────────────────────────────────
 delete-claims:
-	@echo "==> Deleting claims..."
-	@kubectl delete kubernetescluster -n $(NAMESPACE) --all 2>/dev/null || true
-	@echo "    Waiting for managed resources to be deleted..."
-	@echo "    (this can take several minutes as EKS clusters are deprovisioned)"
+	@echo "==> Deleting claims in namespace $(NAMESPACE)..."
+	@kubectl get kubernetescluster -n $(NAMESPACE) 2>/dev/null || \
+		(echo "    ERROR: no claims found in namespace $(NAMESPACE) — check NAMESPACE variable" && exit 1)
+	@kubectl delete kubernetescluster -n $(NAMESPACE) --all
+	@echo "    Claims deleted. Composite resources are being garbage-collected..."
+	@echo "    AWS resources (EKS, VPC, IAM) take several minutes to deprovision."
+	@echo "    Watch: kubectl get managed | grep gameserver"
 
 delete-packages:
 	@echo "==> Deleting Crossplane packages..."
@@ -404,4 +407,9 @@ delete-packages:
 	done
 
 teardown: delete-claims delete-packages
+	@echo ""
 	@echo "==> Teardown complete."
+	@echo "    Crossplane will now garbage-collect all managed AWS resources"
+	@echo "    (EKS clusters, VPCs, IAM roles, OIDC providers, NLBs)."
+	@echo "    This takes several minutes — watch progress with:"
+	@echo "      kubectl get managed | grep gameserver"

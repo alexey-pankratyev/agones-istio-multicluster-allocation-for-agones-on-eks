@@ -291,7 +291,7 @@ spec:
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-ekscluster
           spec:
-            deletionPolicy: Orphan
+            deletionPolicy: Delete
             forProvider:
               region: {{ $params.region }}
               version: {{ $params.version | default "1.35" | quote }}
