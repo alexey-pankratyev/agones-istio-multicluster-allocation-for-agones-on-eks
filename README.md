@@ -550,10 +550,15 @@ The two clusters use non-overlapping /16 blocks (`10.100.0.0/16` and `10.110.0.0
 
 ### Network connectivity between clusters
 
-The east-west gateways communicate over the internet (or via Transit Gateway if you prefer private routing). The NLBs are internal by default in this configuration (`aws-load-balancer-scheme: internal`). For cross-region connectivity you need either:
+The east-west gateway NLBs are provisioned as **internal** (`aws-load-balancer-scheme: internal`) — they have no public IP and are only reachable within the AWS network. Cross-region traffic between the two clusters therefore requires connectivity inside AWS.
 
-- AWS Transit Gateway connecting both VPCs (recommended - keeps traffic on AWS backbone)
-- Or change `aws-load-balancer-scheme: internet-facing` and restrict with security groups
+The east-west gateway NLB is currently set to `internet-facing` so the demo works out of the box without Transit Gateway. Port 15443 is the only port exposed — restrict inbound to the other cluster's NLB source IPs via a security group if needed.
+
+**For production** switch to internal and connect via AWS Transit Gateway:
+- Change `aws-load-balancer-scheme: internet-facing` → `internal` in `packages/istio/aws.yaml`
+- Create a TGW in each region and attach both VPCs to it
+- Add a route in each VPC's private route tables pointing the remote CIDR (`10.100.0.0/16` ↔ `10.110.0.0/16`) to the TGW
+- Traffic stays on the AWS backbone, no public exposure
 
 ### Karpenter node consolidation for game servers
 
