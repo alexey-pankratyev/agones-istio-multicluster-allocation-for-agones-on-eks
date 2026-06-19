@@ -54,12 +54,12 @@ This setup follows the [Istio multi-primary on different networks](https://istio
   │  ┌──────────────────────┐ ┌──────────────────────┐ │
   │  │ KubernetesCluster    │ │ KubernetesCluster    │ │
   │  │ gameserver-us-east-1 │ │ gameserver-eu-west-1 │ │
-  │  └──────────┬───────────┘ └──────────┬───────────┘ │
-  │             │ reconciles              │ reconciles   │
-  │  ┌──────────▼─────────────────────────▼───────────┐ │
-  │  │  Crossplane Compositions (eks-cluster package) │ │
-  │  │  → creates XAgonesCluster + XIstio nested XRs  │ │
-  │  └────────────────────────────────────────────────┘ │
+  │  └─────────┬────────────┘ └──────────┬───────────┘ │
+  │            │ reconciles              │ reconciles  │
+  │ ┌──────────▼─────────────────────────▼───────────┐ │
+  │ │  Crossplane Compositions (eks-cluster package) │ │
+  │ │  → creates XAgonesCluster + XIstio nested XRs  │ │
+  │ └────────────────────────────────────────────────┘ │
   │                                                    │
   │  cert-manager namespace                            │
   │  Secret: istio-ca  ◄── created by primary cluster  │
@@ -69,23 +69,23 @@ This setup follows the [Istio multi-primary on different networks](https://istio
             │ AWS API                  │ AWS API
             ▼                          ▼
   ┌─────────────────────┐    ┌─────────────────────────┐
-  │  EKS: us-east-1     │    │  EKS: eu-west-1          │
-  │  VPC: 10.0.0.0/16   │    │  VPC: 10.1.0.0/16        │
-  │                     │    │                          │
-  │  ┌───────────────┐  │    │  ┌───────────────────┐   │
-  │  │ istiod        │  │    │  │ istiod             │   │
-  │  │ (multi-       │  │    │  │ (multi-primary,    │   │
-  │  │  primary)     │  │    │  │  independent CP)   │   │
-  │  └───────────────┘  │    │  └───────────────────┘   │
-  │                     │    │                          │
-  │  ┌───────────────┐  │    │  ┌───────────────────┐   │
-  │  │ east-west     │◄─┼────┼─►│ east-west         │   │
-  │  │ gateway       │  │    │  │ gateway            │   │
-  │  │ NLB:15443     │  │    │  │ NLB:15443          │   │
-  │  └───────────────┘  │    │  └───────────────────┘   │
-  │  Network:           │    │  Network:                 │
-  │  us-east-1-istio-   │    │  eu-west-1-istio-        │
-  │  network            │    │  network                  │
+  │  EKS: us-east-1     │    │  EKS: eu-west-1         │
+  │  VPC: 10.0.0.0/16   │    │  VPC: 10.1.0.0/16       │
+  │                     │    │                         │
+  │  ┌───────────────┐  │    │  ┌───────────────────┐  │
+  │  │ istiod        │  │    │  │ istiod            │  │
+  │  │ (multi-       │  │    │  │ (multi-primary,   │  │
+  │  │  primary)     │  │    │  │  independent CP)  │  │
+  │  └───────────────┘  │    │  └───────────────────┘  │
+  │                     │    │                         │
+  │  ┌───────────────┐  │    │  ┌───────────────────┐  │
+  │  │ east-west     │◄─┼────┼─►│ east-west         │  │
+  │  │ gateway       │  │    │  │ gateway           │  │
+  │  │ NLB:15443     │  │    │  │ NLB:15443         │  │
+  │  └───────────────┘  │    │  └───────────────────┘  │
+  │  Network:           │    │  Network:               │
+  │  us-east-1-istio-   │    │  eu-west-1-istio-       │
+  │  network            │    │  network                │
   └─────────────────────┘    └─────────────────────────┘
 ```
 
@@ -112,7 +112,7 @@ Management cluster
 │  (consumed by eu-west-1 istio package → placed on         │
 │   eu-west-1 cluster in namespace istio-system)            │
 │                                                           │
-│  (same pattern in reverse for eu-west-1 → us-east-1)     │
+│  (same pattern in reverse for eu-west-1 → us-east-1)      │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -153,55 +153,55 @@ The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It call
   us-east-1 cluster
   ┌────────────────────────────────────────────────────────────────┐
   │                                                                │
-  │  ┌──────────────────┐                                         │
-  │  │  Matchmaker pod  │                                         │
-  │  │  (agones-        │                                         │
-  │  │   gameservers ns)│                                         │
-  │  └────────┬─────────┘                                         │
+  │  ┌──────────────────┐                                          │
+  │  │  Matchmaker pod  │                                          │
+  │  │  (agones-        │                                          │
+  │  │   gameservers ns)│                                          │
+  │  └────────┬─────────┘                                          │
   │           │  gRPC call to:                                     │
   │           │  agones-allocator.agones-system.svc.cluster.local  │
   │           │  Header: mesh-region: eu-west-1                    │
   │           │                                                    │
   │           ▼  (Istio sidecar intercepts)                        │
-  │  ┌────────────────────────────────────────┐                   │
+  │  ┌────────────────────────────────────────┐                    │
   │  │  Envoy (matchmaker sidecar)             │                   │
   │  │  Looks up VirtualService rule:          │                   │
   │  │    mesh-region: eu-west-1               │                   │
   │  │    → subset eu-west-1                   │                   │
   │  │    → host agones-allocator...           │                   │
   │  │      routed via east-west GW endpoint   │                   │
-  │  └────────────────┬───────────────────────┘                   │
+  │  └────────────────┬───────────────────────┘                    │
   │                   │  mTLS (ISTIO_MUTUAL)                       │
   │                   ▼                                            │
-  │  ┌────────────────────────────────────────┐                   │
+  │  ┌────────────────────────────────────────┐                    │
   │  │  East-west gateway (us-east-1)          │                   │
   │  │  NLB port 15443                         │                   │
   │  │  SNI: agones-allocator.agones-system    │                   │
   │  │       .svc.cluster.local                │                   │
   │  │  AUTO_PASSTHROUGH — TLS not terminated  │                   │
-  │  └────────────────┬───────────────────────┘                   │
+  │  └────────────────┬───────────────────────┘                    │
   └───────────────────┼────────────────────────────────────────────┘
                       │  NLB → NLB  (cross-region: TGW or internet)
                       ▼
   eu-west-1 cluster
   ┌────────────────────────────────────────────────────────────────┐
   │                   │                                            │
-  │  ┌────────────────▼───────────────────────┐                   │
+  │  ┌────────────────▼───────────────────────┐                    │
   │  │  East-west gateway (eu-west-1)          │                   │
   │  │  Matches SNI → routes to local service  │                   │
-  │  └────────────────┬───────────────────────┘                   │
+  │  └────────────────┬───────────────────────┘                    │
   │                   │                                            │
   │                   ▼                                            │
-  │  ┌────────────────────────────────────────┐                   │
+  │  ┌────────────────────────────────────────┐                    │
   │  │  agones-allocator pod (eu-west-1)       │                   │
   │  │  Finds a Ready GameServer               │                   │
   │  │  Returns: NodeIP, port, credentials     │                   │
-  │  └────────────────────────────────────────┘                   │
+  │  └────────────────────────────────────────┘                    │
   │                                                                │
-  │  ┌────────────────────────────────────────┐                   │
+  │  ┌────────────────────────────────────────┐                    │
   │  │  Karpenter game server nodes (SPOT)     │                   │
   │  │  Fleet: 5 × Ready GameServer pods       │                   │
-  │  └────────────────────────────────────────┘                   │
+  │  └────────────────────────────────────────┘                    │
   └────────────────────────────────────────────────────────────────┘
 ```
 
