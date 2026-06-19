@@ -213,7 +213,7 @@ spec:
                   role: {{ $id }}-nodegroup
                   subnetSelectorTerms:
                   - tags:
-                      karpenter.sh/subnetzone: {{ $params.vpcSubnetSelectorPrivate }}
+                      karpenter.sh/discovery: {{ $id }}
                   securityGroupSelectorTerms:
                   - tags:
                       aws:eks:cluster-name: {{ $id }}
@@ -289,6 +289,8 @@ spec:
                   key: istio.io/istio-system
                   operator: Equal
                   value: "true"
+                - key: CriticalAddonsOnly
+                  operator: Exists
                 meshConfig:
                   accessLogFile: /dev/stdout
                   defaultConfig:
@@ -325,70 +327,203 @@ spec:
                     clusterName: {{ $id }}
                   network: {{ $id }}-istio-network
           ---
-          # East-west gateway — the cross-cluster data plane.
-          # Exposes port 15443 (TLS/AUTO_PASSTHROUGH) for cross-cluster service access.
-          # AWS NLB annotations create an internal NLB with cross-zone load balancing.
-          apiVersion: helm.crossplane.io/v1beta1
-          kind: Release
+          # East-west gateway ServiceAccount
+          # Deployed as direct Objects instead of Helm Release to avoid the Istio
+          # gateway chart's broken JSON Schema validation (values.schema.json has
+          # additionalProperties:false at root but $ref resolves to allowed fields —
+          # a known Helm+Istio incompatibility since 1.24+).
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
           metadata:
-            name: {{ $id }}-istio-eastwestgateway
+            name: {{ $id }}-istio-ewgw-sa
             annotations:
-              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-eastwestgateway
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ewgw-sa
           spec:
             providerConfigRef:
-              name: {{ $id }}-helm
+              name: {{ $id }}-kubernetes
             forProvider:
-              chart:
-                name: gateway
-                repository: {{ $params.repository }}
-                version: {{ $params.version }}
-              namespace: {{ $params.namespace | default "istio-system" }}
-              values:
-                autoscaling:
-                  enabled: true
-                  minReplicas: 2
-                  maxReplicas: 6
-                  targetCPUUtilizationPercentage: 80
-                podDisruptionBudget:
-                  minAvailable: "50%"
-                  unhealthyPodEvictionPolicy: AlwaysAllow
-                topologySpreadConstraints:
-                - labelSelector:
-                    matchLabels:
-                      istio: eastwestgateway
-                  maxSkew: 1
-                  topologyKey: topology.kubernetes.io/zone
-                  whenUnsatisfiable: DoNotSchedule
-                env:
-                  ISTIO_META_REQUESTED_NETWORK_VIEW: {{ $id }}-istio-network
-                labels:
-                  app: istio-eastwestgateway
-                  istio: eastwestgateway
-                  mesh-region: {{ $params.region }}
-                  topology.istio.io/network: {{ $id }}-istio-network
-                  istio.io/dataplane-mode: none
-                networkGateway: {{ $id }}-istio-network
-                service:
-                  type: LoadBalancer
-                  ports:
-                  - name: tls
-                    port: 15443
-                    targetPort: 15443
-                    nodePort: 31443
+              manifest:
+                apiVersion: v1
+                kind: ServiceAccount
+                metadata:
+                  name: {{ $id }}-istio-eastwestgateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    app: istio-eastwestgateway
+                    istio: eastwestgateway
+                    istio.io/dataplane-mode: none
+          ---
+          # East-west gateway Role
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-ewgw-role
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ewgw-role
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: Role
+                metadata:
+                  name: {{ $id }}-istio-eastwestgateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    app: istio-eastwestgateway
+                rules:
+                - apiGroups: [""]
+                  resources: ["secrets"]
+                  verbs: ["get", "watch", "list"]
+          ---
+          # East-west gateway RoleBinding
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-ewgw-rolebinding
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ewgw-rolebinding
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: rbac.authorization.k8s.io/v1
+                kind: RoleBinding
+                metadata:
+                  name: {{ $id }}-istio-eastwestgateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    app: istio-eastwestgateway
+                roleRef:
+                  apiGroup: rbac.authorization.k8s.io
+                  kind: Role
+                  name: {{ $id }}-istio-eastwestgateway
+                subjects:
+                - kind: ServiceAccount
+                  name: {{ $id }}-istio-eastwestgateway
+          ---
+          # East-west gateway Service — NLB internet-facing for demo cross-region connectivity.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-ewgw-svc
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ewgw-svc
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: {{ $id }}-istio-eastwestgateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    app: istio-eastwestgateway
+                    istio: eastwestgateway
+                    topology.istio.io/network: {{ $id }}-istio-network
                   annotations:
                     service.beta.kubernetes.io/aws-load-balancer-type: external
                     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
                     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
                     service.beta.kubernetes.io/aws-load-balancer-attributes: load_balancing.cross_zone.enabled=true
-                    service.beta.kubernetes.io/aws-load-balancer-ip-address-type: ipv4
-                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "30"
+                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "15021"
                     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
-                    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "15443"
-                tolerations:
-                - effect: NoExecute
-                  key: istio.io/istio-system
-                  operator: Equal
-                  value: "true"
+                spec:
+                  type: LoadBalancer
+                  selector:
+                    app: istio-eastwestgateway
+                    istio: eastwestgateway
+                  ports:
+                  - name: status-port
+                    port: 15021
+                    targetPort: 15021
+                  - name: tls
+                    port: 15443
+                    targetPort: 15443
+                  - name: tls-istiod
+                    port: 15012
+                    targetPort: 15012
+          ---
+          # East-west gateway Deployment — sidecar injection creates the Envoy proxy.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: {{ $id }}-istio-ewgw-deployment
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-ewgw-deployment
+          spec:
+            providerConfigRef:
+              name: {{ $id }}-kubernetes
+            forProvider:
+              manifest:
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: {{ $id }}-istio-eastwestgateway
+                  namespace: {{ $params.namespace | default "istio-system" }}
+                  labels:
+                    app: istio-eastwestgateway
+                    istio: eastwestgateway
+                spec:
+                  selector:
+                    matchLabels:
+                      app: istio-eastwestgateway
+                      istio: eastwestgateway
+                  template:
+                    metadata:
+                      annotations:
+                        inject.istio.io/templates: gateway
+                        prometheus.io/path: /stats/prometheus
+                        prometheus.io/port: "15020"
+                        prometheus.io/scrape: "true"
+                        sidecar.istio.io/inject: "true"
+                      labels:
+                        app: istio-eastwestgateway
+                        istio: eastwestgateway
+                        sidecar.istio.io/inject: "true"
+                        istio.io/dataplane-mode: none
+                        topology.istio.io/network: {{ $id }}-istio-network
+                    spec:
+                      serviceAccountName: {{ $id }}-istio-eastwestgateway
+                      securityContext:
+                        sysctls:
+                        - name: net.ipv4.ip_unprivileged_port_start
+                          value: "0"
+                      tolerations:
+                      - effect: NoExecute
+                        key: istio.io/istio-system
+                        operator: Equal
+                        value: "true"
+                      containers:
+                      - name: istio-proxy
+                        image: auto
+                        securityContext:
+                          capabilities:
+                            drop: [ALL]
+                          allowPrivilegeEscalation: false
+                          privileged: false
+                          readOnlyRootFilesystem: true
+                          runAsUser: 1337
+                          runAsGroup: 1337
+                          runAsNonRoot: true
+                        env:
+                        - name: ISTIO_META_REQUESTED_NETWORK_VIEW
+                          value: {{ $id }}-istio-network
+                        ports:
+                        - containerPort: 15090
+                          protocol: TCP
+                          name: http-envoy-prom
+                        resources:
+                          requests:
+                            cpu: 100m
+                            memory: 128Mi
+                          limits:
+                            cpu: 2000m
+                            memory: 1024Mi
           ---
           # cross-network-gateway: tells the east-west gateway to auto-passthrough
           # TLS for any *.local host — required for cross-cluster service access.
@@ -539,6 +674,49 @@ spec:
                 metadata:
                   name: istio-remote-secret-{{ $id }}
                   namespace: {{ $params.namespace | default "istio-system" }}
+                  annotations:
+                    networking.istio.io/cluster: {{ $id }}
+                  labels:
+                    istio/multiCluster: "true"
+                stringData:
+                  {{ $id }}: |
+                        apiVersion: v1
+                        clusters:
+                        - cluster:
+                            certificate-authority-data: {{ $params.certificateAuthorityData }}
+                            server: {{ $params.clusterEndpoint }}
+                          name: {{ $id }}
+                        contexts:
+                        - context:
+                            cluster: {{ $id }}
+                            user: {{ $id }}
+                          name: {{ $id }}
+                        current-context: {{ $id }}
+                        kind: Config
+                        preferences: {}
+                        users:
+                        - name: {{ $id }}
+                          user:
+                            token: {{ $tokenString }}
+          ---
+          # Mirror this cluster's remote secret to its namespace on the management cluster.
+          # Peer clusters read it from here via Crossplane references.
+          apiVersion: kubernetes.crossplane.io/v1alpha2
+          kind: Object
+          metadata:
+            name: istio-remote-secret-{{ $id }}-mgmt
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: istio-remote-secret-{{ $id }}-mgmt
+          spec:
+            providerConfigRef:
+              name: default
+            forProvider:
+              manifest:
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: istio-remote-secret-{{ $id }}
+                  namespace: {{ $id }}
                   annotations:
                     networking.istio.io/cluster: {{ $id }}
                   labels:

@@ -42,7 +42,8 @@ spec:
               AZ index 1: private 10.100.1.0/24, public 10.100.101.0/24
             The base octet is derived from the second octet of the CIDR.
           */ -}}
-          {{- $cidrBase := $cidr | splitList "." | slice 0 2 | join "." }}
+          {{- $cidrParts := $cidr | splitList "." }}
+          {{- $cidrBase := printf "%s.%s" (index $cidrParts 0) (index $cidrParts 1) }}
           ---
           # VPC
           apiVersion: ec2.aws.upbound.io/v1beta1
@@ -127,6 +128,7 @@ spec:
                 Name: {{ $id }}-public-{{ $az }}
                 kubernetes.io/role/elb: "1"
                 karpenter.sh/subnetzone: {{ $az }}-public
+                karpenter.sh/discovery: {{ $id }}
           ---
           # Private subnet for AZ {{ $az }}
           apiVersion: ec2.aws.upbound.io/v1beta1
@@ -147,6 +149,7 @@ spec:
                 Name: {{ $id }}-private-{{ $az }}
                 kubernetes.io/role/internal-elb: "1"
                 karpenter.sh/subnetzone: {{ $az }}
+                karpenter.sh/discovery: {{ $id }}
           ---
           # Elastic IP for NAT GW in AZ {{ $az }}
           apiVersion: ec2.aws.upbound.io/v1beta1

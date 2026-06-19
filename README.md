@@ -283,109 +283,101 @@ All defaults can be overridden in the claim.
 | `function-go-templating` | Go template Composition function |
 | `function-auto-ready` | Readiness detection function |
 
-### Step 1 - Install Crossplane packages on the management cluster
+A `Makefile` is included to run all deployment steps without memorising commands. Run `make` or `make help` to see all available targets.
+
+### Quick start — one command
 
 ```bash
-kubectl apply -f packages/vpc/
-kubectl apply -f packages/eks-cluster/
-kubectl apply -f packages/agones/
-kubectl apply -f packages/istio/
+make deploy
 ```
 
-Wait for XRDs to become established:
+AWS account ID is auto-detected from your current credentials via `aws sts get-caller-identity`. To override:
 
 ```bash
-kubectl wait xrd xvpcs.demo.crossplane.io                 --for=condition=Established --timeout=60s
-kubectl wait xrd xkubernetesclusters.demo.crossplane.io   --for=condition=Established --timeout=60s
-kubectl wait xrd xagonesclusters.demo.crossplane.io       --for=condition=Established --timeout=60s
-kubectl wait xrd xistios.demo.crossplane.io               --for=condition=Established --timeout=60s
+make deploy AWS_ACCOUNT_ID=123456789012
 ```
 
-### Step 2 - Create the namespace for claims
+This single target runs `check-prereqs → install-packages → create-namespace → apply-claims` in sequence. EKS clusters take ~15 minutes to become fully ready.
+
+### Step by step
+
+If you prefer to run each phase individually:
 
 ```bash
-kubectl create namespace demo
+# Verify kubectl context, crossplane CLI, aws CLI, and that Crossplane is installed
+make check-prereqs
+
+# Apply XRDs and Compositions to the management cluster
+make install-packages
+
+# Create the demo namespace and submit both cluster claims
+make apply-claims
 ```
 
-### Step 3 - Apply the primary cluster claim (us-east-1)
+The `apply-claims` target substitutes the placeholder account number in `examples/cluster-*.yaml` at apply time using `sed` — the example files themselves are never modified and safe to commit.
+
+### Tracking progress
 
 ```bash
-kubectl apply -f examples/cluster-us-east-1.yaml
+make status       # claim SYNCED/READY + all composite resource status
+make trace-eu     # full crossplane resource tree for gameserver-eu-west-1
+make trace-us     # full crossplane resource tree for gameserver-us-east-1
 ```
 
-This claim has `istio.primary: true`. The Composition will:
-1. Create the Istio root CA (`istio-ca` Secret) in `cert-manager` on the management cluster
-2. Provision a VPC (`10.110.0.0/16`) with public and private subnets in us-east-1a and us-east-1b
-3. Provision the EKS cluster in us-east-1 (version 1.35) wired to the new subnets
-4. Install cert-manager, Karpenter 1.13.0, EKS addons
-5. Install Agones 1.55.0 via the `agones` nested XR; IRSA role created automatically once OIDC issuer appears in EKS status
-6. Install Istio (istiod + east-west gateway) via the `istio` nested XR
+### What gets provisioned
 
-Watch progress:
+Both claims are submitted together and reconcile in parallel. Each one creates:
+
+1. **VPC** — `10.110.0.0/16` (us-east-1) and `10.100.0.0/16` (eu-west-1), public + private subnets across 2 AZs, IGW, NAT GWs, route tables
+2. **EKS 1.35** — control plane wired to the new subnets, system NodeGroup with `CriticalAddonsOnly` taint
+3. **Karpenter 1.13.0** — IRSA role and OIDC provider auto-created once EKS reports its issuer URL
+4. **EKS addons** — CoreDNS, kube-proxy, VPC CNI, EBS CSI driver
+5. **cert-manager v1.17.2** — webhook certs for Agones; shared Istio root CA on the primary cluster
+6. **Agones 1.55.0** — allocator, controller, extensions with Istio sidecar; Karpenter NodePools for game server and system nodes
+7. **Istio 1.26.2** — istiod (multi-primary), east-west gateway NLB, shared mTLS root CA, cross-cluster remote secrets
+
+The us-east-1 claim has `istio.primary: true` — it creates the shared Istio root CA in cert-manager on the management cluster. The eu-west-1 claim receives that CA automatically via Crossplane namespace references.
+
+### Getting kubeconfigs
 
 ```bash
-# Overall claim status
-kubectl get kubernetescluster gameserver-us-east-1 -n demo -w
-
-# All managed resources
-kubectl get managed -l crossplane.io/claim-name=gameserver-us-east-1 -n demo
-
-# VPC and subnets
-kubectl get vpc.ec2.aws.upbound.io,subnet.ec2.aws.upbound.io \
-  -l crossplane.io/composite=gameserver-us-east-1-vpc
-
-# EKS cluster
-kubectl get cluster.eks.aws.upbound.io gameserver-us-east-1 -w
+make kubeconfig-eu    # writes /tmp/eu-west-1.kubeconfig
+make kubeconfig-us    # writes /tmp/us-east-1.kubeconfig
 ```
 
-### Step 4 - Apply the secondary cluster claim (eu-west-1)
+After that, use them with any `kubectl` or `istioctl` command:
 
 ```bash
-kubectl apply -f examples/cluster-eu-west-1.yaml
+KUBECONFIG=/tmp/eu-west-1.kubeconfig kubectl get nodes
+KUBECONFIG=/tmp/us-east-1.kubeconfig kubectl get pods -n agones-system
 ```
 
-This claim has `istio.primary: false`. The Composition will:
-1. Provision a VPC (`10.100.0.0/16`) with public and private subnets in eu-west-1a and eu-west-1b
-2. Provision the EKS cluster in eu-west-1
-3. Install the same base components
-4. Install Agones with `istio.enabled: true`; OIDC auto-derived as in us-east-1
-5. Copy the `istio-ca` Secret from `cert-manager` into this cluster's `istio-system`
-6. Install Istio pointing at us-east-1 as a peer cluster
-
-### Step 5 - Verify the Istio mesh
-
-After both clusters are ready, verify cross-cluster service discovery:
+### Verify the Istio mesh
 
 ```bash
-# Get kubeconfigs written by ClusterAuth
-kubectl get secret gameserver-us-east-1-kubeconfig -n crossplane-system -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/us-east-1.kubeconfig
-kubectl get secret gameserver-eu-west-1-kubeconfig -n crossplane-system -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/eu-west-1.kubeconfig
-
 # Check remote cluster discovery from us-east-1
 istioctl remote-clusters --kubeconfig=/tmp/us-east-1.kubeconfig
 # NAME                      SECRET                                    STATUS    ISTIOD
 # gameserver-eu-west-1      istio-remote-secret-gameserver-eu-west-1  synced    istiod-xxx
 
-# Verify east-west gateways are reachable
-kubectl get svc --kubeconfig=/tmp/us-east-1.kubeconfig -n istio-system \
+# Verify east-west gateways received NLB addresses
+kubectl get svc -n istio-system --kubeconfig=/tmp/us-east-1.kubeconfig \
   gameserver-us-east-1-istio-eastwestgateway
-# Should show an EXTERNAL-IP (NLB hostname)
 
-# Verify cacerts are present and identical on both clusters
+# Verify both clusters share the same root CA — fingerprints must match
 kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/us-east-1.kubeconfig \
   -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
 
 kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/eu-west-1.kubeconfig \
   -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
-# Fingerprints must match - same root CA
 ```
 
-### Step 6 - Deploy a Fleet and test allocation
-
-Deploy the same Fleet on both clusters:
+### Deploy a Fleet and test allocation
 
 ```bash
-cat <<EOF | kubectl apply --kubeconfig=/tmp/us-east-1.kubeconfig -f -
+# Deploy game servers on both clusters
+for KC in /tmp/us-east-1.kubeconfig /tmp/eu-west-1.kubeconfig; do
+  kubectl apply --kubeconfig=$KC -f - <<EOF
 apiVersion: agones.dev/v1
 kind: Fleet
 metadata:
@@ -409,51 +401,29 @@ spec:
           - name: server
             image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34
 EOF
+done
 
-# Same on eu-west-1
-cat <<EOF | kubectl apply --kubeconfig=/tmp/eu-west-1.kubeconfig -f -
-apiVersion: agones.dev/v1
-kind: Fleet
-metadata:
-  name: demo-gameserver
-  namespace: agones-gameservers
-spec:
-  replicas: 5
-  template:
-    spec:
-      ports:
-      - name: default
-        containerPort: 7777
-      template:
-        spec:
-          tolerations:
-          - key: agones.dev/agones-gameservers-arm64
-            operator: Equal
-            value: "true"
-            effect: NoExecute
-          containers:
-          - name: server
-            image: us-docker.pkg.dev/agones-images/examples/simple-game-server:0.34
-EOF
-```
-
-Test allocation targeting eu-west-1 from a pod running in us-east-1:
-
-```bash
-# Run a test pod on us-east-1
+# Test cross-region allocation: run a client on us-east-1, target eu-west-1
 kubectl run allocator-test --kubeconfig=/tmp/us-east-1.kubeconfig \
   --image=ghcr.io/googleforgames/agones/allocator:1.55.0 \
   --restart=Never --rm -it -- /bin/sh
 
-# Inside the pod - allocate from eu-west-1 via the mesh
-# The mesh-region header tells Istio's VirtualService which subset to route to
+# Inside the pod — the mesh-region header tells Istio which cluster to route to:
 grpc_cli call \
   agones-allocator.agones-system.svc.cluster.local:443 \
   agones.dev.Allocator.Allocate \
   "namespace: 'agones-gameservers', multi_cluster_setting: {enabled: true}" \
   --metadata "mesh-region:eu-west-1"
-# Returns a GameServer from eu-west-1 cluster
+# Returns a GameServer from the eu-west-1 cluster
 ```
+
+### Teardown
+
+```bash
+make teardown
+```
+
+Deletes both claims (cascades to all managed resources — EKS clusters, VPCs, IAM roles, OIDC providers) and removes the Crossplane XRDs and Compositions from the management cluster.
 
 ---
 

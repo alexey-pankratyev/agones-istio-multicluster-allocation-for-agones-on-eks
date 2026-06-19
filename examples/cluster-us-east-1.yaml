@@ -58,7 +58,7 @@ spec:
           iops: "3000"
           throughput: "125"
           amiFamily: Bottlerocket
-          amiAlias: bottlerocket@1.57.0
+          amiAlias: bottlerocket@latest
           deviceName: "/dev/xvdb"
         limits:
           cpu: "200"

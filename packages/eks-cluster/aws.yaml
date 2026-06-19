@@ -93,6 +93,22 @@ spec:
           {{- $agones := get $params "agones" | default dict }}
           {{- $subnetSelectorPrivate := index $agones "vpcSubnetSelectorPrivate" | default $firstAz }}
           {{- $subnetSelectorPublic := index $agones "vpcSubnetSelectorPublic" | default (print $firstAz "-public") }}
+
+          {{- /* Read all EKS cluster status fields needed throughout the template.
+               All are empty on cycle 1 (cluster not yet created) and populated from cycle 2 onward. */ -}}
+          {{- $clusterStatusRes := get .observed.resources (print $id "-ekscluster") | default dict }}
+          {{- $eksAtProvider := dict }}
+          {{- if and $clusterStatusRes $clusterStatusRes.resource $clusterStatusRes.resource.status $clusterStatusRes.resource.status.atProvider }}
+            {{- $eksAtProvider = $clusterStatusRes.resource.status.atProvider }}
+          {{- end }}
+
+          {{- /* OIDC issuer — used for Karpenter IRSA, Agones SDK IRSA */ -}}
+          {{- $oidcFull := index $eksAtProvider "identity" | default list | first | default dict | dig "oidc" list | first | default dict | dig "issuer" "" }}
+          {{- $oidc := trimPrefix "https://" $oidcFull }}
+
+          {{- /* Cluster endpoint and CA — used for Istio XIstio nested XR */ -}}
+          {{- $endpoint := index $eksAtProvider "endpoint" | default "" }}
+          {{- $caData := index $eksAtProvider "certificateAuthority" | default list | first | default dict | dig "data" "" }}
           ---
           # EKS control-plane IAM role
           apiVersion: iam.aws.upbound.io/v1beta1
@@ -183,6 +199,81 @@ spec:
               policyArn: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
               roleRef:
                 name: {{ $id }}-nodegroup
+          {{- if $oidc }}
+          ---
+          # OIDC Identity Provider — registers the EKS cluster OIDC issuer in IAM
+          # so STS can validate tokens for AssumeRoleWithWebIdentity (IRSA).
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: OpenIDConnectProvider
+          metadata:
+            name: {{ $id }}-oidc-provider
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-oidc-provider
+          spec:
+            forProvider:
+              url: https://{{ $oidc }}
+              clientIdList:
+              - sts.amazonaws.com
+              thumbprintList:
+              - "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
+          ---
+          # Karpenter IAM Role (IRSA) — allows Karpenter to call EC2/SQS/IAM APIs.
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Role
+          metadata:
+            name: {{ $id }}-karpenter
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-role-karpenter
+          spec:
+            forProvider:
+              assumeRolePolicy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Federated": "arn:aws:iam::{{ $params.awsAccountNumber }}:oidc-provider/{{ $oidc }}"
+                    },
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {
+                      "StringEquals": {
+                        "{{ $oidc }}:aud": "sts.amazonaws.com",
+                        "{{ $oidc }}:sub": "system:serviceaccount:kube-system:{{ $id }}-karpenter"
+                      }
+                    }
+                  }]
+                }
+          ---
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: Policy
+          metadata:
+            name: {{ $id }}-karpenter-policy
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-policy-karpenter
+          spec:
+            forProvider:
+              policy: |
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {"Effect":"Allow","Action":["ec2:CreateLaunchTemplate","ec2:CreateFleet","ec2:RunInstances","ec2:CreateTags","ec2:TerminateInstances","ec2:DeleteLaunchTemplate","ec2:DescribeLaunchTemplates","ec2:DescribeInstances","ec2:DescribeSecurityGroups","ec2:DescribeSubnets","ec2:DescribeImages","ec2:DescribeInstanceTypes","ec2:DescribeInstanceTypeOfferings","ec2:DescribeAvailabilityZones","ec2:DescribeSpotPriceHistory","ec2:DescribeInstanceAttribute","ec2:DescribeInterruptionEventQueues","ec2:DescribeCapacityReservations","ec2:DescribeNetworkInterfaces","sqs:DeleteMessage","sqs:GetQueueUrl","sqs:GetQueueAttributes","sqs:ReceiveMessage","iam:PassRole","iam:CreateInstanceProfile","iam:TagInstanceProfile","iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile","iam:ListInstanceProfiles","iam:ListInstanceProfilesForRole","ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","pricing:GetProducts"],"Resource":"*"},
+                    {"Effect":"Allow","Action":["eks:DescribeCluster"],"Resource":"*"}
+                  ]
+                }
+          ---
+          apiVersion: iam.aws.upbound.io/v1beta1
+          kind: RolePolicyAttachment
+          metadata:
+            name: {{ $id }}-karpenter-policy-attachment
+            annotations:
+              gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-karpenter-policy-attachment
+          spec:
+            forProvider:
+              roleRef:
+                name: {{ $id }}-karpenter
+              policyArnRef:
+                name: {{ $id }}-karpenter-policy
+          {{- end }}
           ---
           # EKS Cluster
           apiVersion: eks.aws.upbound.io/v1beta2
@@ -197,7 +288,7 @@ spec:
             deletionPolicy: Orphan
             forProvider:
               region: {{ $params.region }}
-              version: {{ $params.version | default "1.35" }}
+              version: {{ $params.version | default "1.35" | quote }}
               accessConfig:
                 authenticationMode: API_AND_CONFIG_MAP
                 bootstrapClusterCreatorAdminPermissions: true
@@ -212,7 +303,7 @@ spec:
                 {{- end }}
                 {{- end }}
                 endpointPrivateAccess: true
-                endpointPublicAccess: false
+                endpointPublicAccess: true
               roleArnRef:
                 name: {{ $id }}-controlplane
           ---
@@ -246,8 +337,18 @@ spec:
               taint:
               - effect: NO_SCHEDULE
                 key: CriticalAddonsOnly
+          {{- /* Read the EKS-managed cluster security group ID from status once the cluster is ready.
+               atProvider.vpcConfig is a list of maps in upbound provider-aws. */ -}}
+          {{- $clusterSgId := "" }}
+          {{- $clusterResForSg := get .observed.resources (print $id "-ekscluster") | default dict }}
+          {{- if and $clusterResForSg $clusterResForSg.resource $clusterResForSg.resource.status $clusterResForSg.resource.status.atProvider }}
+            {{- $vpcCfgMap := index $clusterResForSg.resource.status.atProvider "vpcConfig" | default dict }}
+            {{- $clusterSgId = index $vpcCfgMap "clusterSecurityGroupId" | default "" }}
+          {{- end }}
+          {{- if $clusterSgId }}
           ---
           # Security group rule: Agones game server UDP port range
+          # Applied to the EKS-managed cluster security group once it appears in cluster status.
           apiVersion: ec2.aws.upbound.io/v1beta1
           kind: SecurityGroupRule
           metadata:
@@ -262,8 +363,8 @@ spec:
               toPort: 8000
               protocol: udp
               type: ingress
-              securityGroupIdSelector:
-                matchControllerRef: true
+              securityGroupId: {{ $clusterSgId }}
+          {{- end }}
           ---
           # Cluster auth — writes kubeconfig to a Secret consumed by k8s/helm ProviderConfigs
           apiVersion: eks.aws.upbound.io/v1beta1
@@ -288,6 +389,7 @@ spec:
             name: {{ $id }}-kubernetes
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-providerconfig-k8s
+              gotemplating.fn.crossplane.io/ready: "True"
           spec:
             credentials:
               source: Secret
@@ -303,6 +405,7 @@ spec:
             name: {{ $id }}-helm
             annotations:
               gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-providerconfig-helm
+              gotemplating.fn.crossplane.io/ready: "True"
           spec:
             credentials:
               source: Secret
@@ -390,6 +493,14 @@ spec:
               values:
                 settings:
                   clusterName: {{ $id }}
+                  clusterEndpoint: {{ $endpoint | default "" | quote }}
+                serviceAccount:
+                  annotations:
+                    eks.amazonaws.com/role-arn: "arn:aws:iam::{{ $params.awsAccountNumber }}:role/{{ $id }}-karpenter"
+                controller:
+                  env:
+                  - name: AWS_REGION
+                    value: {{ $params.region }}
                 tolerations:
                 - key: CriticalAddonsOnly
                   operator: Exists
@@ -412,9 +523,25 @@ spec:
               namespace: cert-manager
               values:
                 installCRDs: true
+                global:
+                  tolerations:
+                  - key: CriticalAddonsOnly
+                    operator: Exists
                 tolerations:
                 - key: CriticalAddonsOnly
                   operator: Exists
+                webhook:
+                  tolerations:
+                  - key: CriticalAddonsOnly
+                    operator: Exists
+                cainjector:
+                  tolerations:
+                  - key: CriticalAddonsOnly
+                    operator: Exists
+                startupapicheck:
+                  tolerations:
+                  - key: CriticalAddonsOnly
+                    operator: Exists
           ---
           # Self-signed ClusterIssuer for Agones webhook and allocator certs
           apiVersion: kubernetes.crossplane.io/v1alpha1
@@ -451,7 +578,7 @@ spec:
               gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-root-ca-selfsigned-issuer
           spec:
             providerConfigRef:
-              name: local-kubernetes
+              name: default
             forProvider:
               manifest:
                 apiVersion: cert-manager.io/v1
@@ -469,7 +596,7 @@ spec:
               gotemplating.fn.crossplane.io/composition-resource-name: {{ $id }}-istio-root-ca-cert
           spec:
             providerConfigRef:
-              name: local-kubernetes
+              name: default
             forProvider:
               manifest:
                 apiVersion: cert-manager.io/v1
@@ -494,23 +621,6 @@ spec:
 
           {{- $agonesEnabled := index $agones "enabled" | default false }}
 
-          {{- /* Auto-derive OIDC from EKS cluster status so the user doesn't need to provide it.
-               The issuer URL looks like https://oidc.eks.<region>.amazonaws.com/id/<hash>.
-               We strip the leading https:// to get the bare provider URL for IRSA trust policies. */ -}}
-          {{- $oidcFull := "" }}
-          {{- $clusterResForOidc := get .observed.resources (print $id "-ekscluster") | default dict }}
-          {{- if and $clusterResForOidc $clusterResForOidc.resource $clusterResForOidc.resource.status $clusterResForOidc.resource.status.atProvider }}
-            {{- $identityList := index $clusterResForOidc.resource.status.atProvider "identity" | default list }}
-            {{- if $identityList }}
-              {{- $oidcBlock := index $identityList 0 | default dict }}
-              {{- $oidcList := index $oidcBlock "oidc" | default list }}
-              {{- if $oidcList }}
-                {{- $oidcFull = index $oidcList 0 | default dict | get "issuer" | default "" }}
-              {{- end }}
-            {{- end }}
-          {{- end }}
-          {{- $oidc := trimPrefix "https://" $oidcFull }}
-
           {{- if $agonesEnabled }}
           ---
           # ── AGONES nested XR ──────────────────────────────────────────────────────
@@ -524,7 +634,7 @@ spec:
             id: {{ $id }}
             parameters:
               region: {{ $params.region }}
-              awsAccountNumber: {{ $params.awsAccountNumber }}
+              awsAccountNumber: {{ $params.awsAccountNumber | quote }}
               version: {{ index $agones "version" | default "1.55.0" }}
               vpc_subnet_selector_private: {{ $subnetSelectorPrivate }}
               vpc_subnet_selector_public: {{ $subnetSelectorPublic }}
@@ -546,16 +656,6 @@ spec:
           {{- if $istioEnabled }}
           ---
           # ── ISTIO nested XR ───────────────────────────────────────────────────────
-          {{- $clusterRes := get .observed.resources (print $id "-ekscluster") | default dict }}
-          {{- $endpoint := "" }}
-          {{- $caData := "" }}
-          {{- if and $clusterRes $clusterRes.resource $clusterRes.resource.status $clusterRes.resource.status.atProvider }}
-            {{- $endpoint = $clusterRes.resource.status.atProvider.endpoint | default "" }}
-            {{- $caList := $clusterRes.resource.status.atProvider.certificateAuthority | default list }}
-            {{- if $caList }}
-              {{- $caData = index $caList 0 | default dict | get "data" | default "" }}
-            {{- end }}
-          {{- end }}
           apiVersion: demo.crossplane.io/v1alpha1
           kind: XIstio
           metadata:
@@ -570,8 +670,7 @@ spec:
               meshID: {{ index $istio "meshID" }}
               clusterEndpoint: {{ $endpoint | quote }}
               certificateAuthorityData: {{ $caData | quote }}
-              awsAccountNumber: {{ $params.awsAccountNumber }}
-              vpcSubnetSelectorPrivate: {{ $subnetSelectorPrivate }}
+              awsAccountNumber: {{ $params.awsAccountNumber | quote }}
               multicluster: {{ index $istio "multicluster" | default dict | toJson }}
           {{- end }}
 

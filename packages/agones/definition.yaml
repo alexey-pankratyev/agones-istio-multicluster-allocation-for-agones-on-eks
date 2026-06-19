@@ -103,7 +103,7 @@ spec:
                               default: Bottlerocket
                             amiAlias:
                               type: string
-                              default: bottlerocket@1.57.0
+                              default: bottlerocket@latest
                             deviceName:
                               type: string
                               default: "/dev/xvdb"
