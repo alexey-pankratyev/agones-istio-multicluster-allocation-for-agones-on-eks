@@ -8,7 +8,7 @@
 
 You run game servers on AWS. Players are in North America and Europe. You want the nearest cluster to handle allocation, but fall back to the other region when one is saturated. Your matchmaker should not care about cluster topology.
 
-The standard approach — one NLB per cluster, custom endpoint logic in the matchmaker, per-cluster certificate management — becomes an operational burden at scale.
+The standard approach - one NLB per cluster, custom endpoint logic in the matchmaker, per cluster certificate management - becomes an operational burden at scale.
 
 The solution here: Agones multi-cluster allocation routed by an Istio service mesh. The matchmaker sets a `mesh-region` header. Istio routes it to the right regional allocator. `retryRemoteLocalities: true` handles cross-region failover automatically.
 
@@ -37,7 +37,7 @@ The solution here: Agones multi-cluster allocation routed by an Istio service me
     └── cluster-eu-west-1.yaml   # Full claim: EKS + Agones + Istio in eu-west-1
 ```
 
-**One claim per cluster.** The `eks-cluster` Composition calls the `agones` and `istio` packages as nested composite resources — you do not apply separate Agones or Istio claims.
+**One claim per cluster.** The `eks-cluster` Composition calls the `agones` and `istio` packages as nested composite resources - you do not apply separate Agones or Istio claims.
 
 ---
 
@@ -89,7 +89,7 @@ This setup follows the [Istio multi-primary on different networks](https://istio
   └─────────────────────┘    └─────────────────────────┘
 ```
 
-**Multi-primary** means each istiod is independent — there is no single point of failure in the control plane. If us-east-1 istiod goes down, the eu-west-1 data plane continues to work.
+**Multi-primary** means each istiod is independent - there is no single point of failure in the control plane. If us-east-1 istiod goes down, the eu-west-1 data plane continues to work.
 
 **Different networks** means the two VPCs are not peered or connected at the L3 level. All cross-cluster pod-to-pod traffic is tunnelled through the east-west gateway on port 15443 using SNI-based AUTO_PASSTHROUGH.
 
@@ -147,7 +147,7 @@ Exactly **one cluster** should have `istio.primary: true`. That cluster's Compos
 
 ### Agones Multi-Cluster Allocation Flow
 
-The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It calls the local agones-allocator service. Istio intercepts the call on the sidecar and, based on the `mesh-region` header, routes it to the appropriate regional allocator — either locally or across clusters via the east-west gateway.
+The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It calls the local agones-allocator service. Istio intercepts the call on the sidecar and, based on the `mesh-region` header, routes it to the appropriate regional allocator - either locally or across clusters via the east-west gateway.
 
 ```
   us-east-1 cluster
@@ -178,7 +178,7 @@ The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It call
   │  │  NLB port 15443                         │                   │
   │  │  SNI: agones-allocator.agones-system    │                   │
   │  │       .svc.cluster.local                │                   │
-  │  │  AUTO_PASSTHROUGH — TLS not terminated  │                   │
+  │  │  AUTO_PASSTHROUGH - TLS not terminated  │                   │
   │  └────────────────┬───────────────────────┘                    │
   └───────────────────┼────────────────────────────────────────────┘
                       │  NLB → NLB  (cross-region: TGW or internet)
@@ -205,9 +205,9 @@ The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It call
   └────────────────────────────────────────────────────────────────┘
 ```
 
-**Same topology exists on eu-west-1** — it also has a matchmaker, local agones-allocator, and Istio mesh. A matchmaker on eu-west-1 can in exactly the same way route allocations to us-east-1 by setting `mesh-region: us-east-1`.
+**Same topology exists on eu-west-1** - it also has a matchmaker, local agones-allocator, and Istio mesh. A matchmaker on eu-west-1 can in exactly the same way route allocations to us-east-1 by setting `mesh-region: us-east-1`.
 
-The `retryRemoteLocalities: true` policy means if the target regional allocator returns a retryable error (no Ready servers, connection refused), Envoy retries against other subsets automatically — no matchmaker logic required.
+The `retryRemoteLocalities: true` policy means if the target regional allocator returns a retryable error (no Ready servers, connection refused), Envoy retries against other subsets automatically - no matchmaker logic required.
 
 ---
 
@@ -225,7 +225,7 @@ The `retryRemoteLocalities: true` policy means if the target regional allocator 
 | `function-go-templating` | Go template Composition function |
 | `function-auto-ready` | Readiness detection function |
 
-### Step 1 — Install Crossplane packages on the management cluster
+### Step 1 - Install Crossplane packages on the management cluster
 
 ```bash
 kubectl apply -f packages/eks-cluster/
@@ -241,13 +241,13 @@ kubectl wait xrd xagonesclusters.demo.crossplane.io     --for=condition=Establis
 kubectl wait xrd xistios.demo.crossplane.io             --for=condition=Established --timeout=60s
 ```
 
-### Step 2 — Create the namespace for claims
+### Step 2 - Create the namespace for claims
 
 ```bash
 kubectl create namespace demo
 ```
 
-### Step 3 — Apply the primary cluster claim (us-east-1)
+### Step 3 - Apply the primary cluster claim (us-east-1)
 
 ```bash
 kubectl apply -f examples/cluster-us-east-1.yaml
@@ -273,7 +273,7 @@ kubectl get managed -l crossplane.io/claim-name=gameserver-us-east-1 -n demo
 kubectl get cluster.eks.aws.upbound.io gameserver-us-east-1 -w
 ```
 
-### Step 4 — Apply the secondary cluster claim (eu-west-1)
+### Step 4 - Apply the secondary cluster claim (eu-west-1)
 
 ```bash
 kubectl apply -f examples/cluster-eu-west-1.yaml
@@ -286,7 +286,7 @@ This claim has `istio.primary: false`. The Composition will:
 4. Install Agones with `istio.enabled: true`
 5. Install Istio pointing at us-east-1 as a peer cluster
 
-### Step 5 — Verify the Istio mesh
+### Step 5 - Verify the Istio mesh
 
 After both clusters are ready, verify cross-cluster service discovery:
 
@@ -311,10 +311,10 @@ kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/us-east-1.kubeconfi
 
 kubectl get secret cacerts -n istio-system --kubeconfig=/tmp/eu-west-1.kubeconfig \
   -o jsonpath='{.data.root-cert\.pem}' | base64 -d | openssl x509 -noout -fingerprint
-# Fingerprints must match — same root CA
+# Fingerprints must match - same root CA
 ```
 
-### Step 6 — Deploy a Fleet and test allocation
+### Step 6 - Deploy a Fleet and test allocation
 
 Deploy the same Fleet on both clusters:
 
@@ -379,7 +379,7 @@ kubectl run allocator-test --kubeconfig=/tmp/us-east-1.kubeconfig \
   --image=ghcr.io/googleforgames/agones/allocator:1.48.0 \
   --restart=Never --rm -it -- /bin/sh
 
-# Inside the pod — allocate from eu-west-1 via the mesh
+# Inside the pod - allocate from eu-west-1 via the mesh
 # The mesh-region header tells Istio's VirtualService which subset to route to
 grpc_cli call \
   agones-allocator.agones-system.svc.cluster.local:443 \
@@ -395,7 +395,7 @@ grpc_cli call \
 
 ### Why `primary: true` on exactly one cluster?
 
-The shared Istio root CA must be created once. In a real production setup this is typically done by Terraform before any EKS clusters exist. The `primary: true` flag gives you the same result declaratively — Crossplane creates the CA Certificate on the management cluster's cert-manager. All cluster-level `istio` packages then reference it via `namespace/secret` path.
+The shared Istio root CA must be created once. In a real production setup this is typically done by Terraform before any EKS clusters exist. The `primary: true` flag gives you the same result declaratively - Crossplane creates the CA Certificate on the management cluster's cert-manager. All cluster-level `istio` packages then reference it via `namespace/secret` path.
 
 If you have an existing CA (from Terraform or another PKI), set `primary: false` on all clusters and create the `istio-ca` Secret in cert-manager manually before applying any claims.
 
@@ -403,15 +403,15 @@ If you have an existing CA (from Terraform or another PKI), set `primary: false`
 
 The `eks-cluster` Composition creates `XAgonesCluster` and `XIstio` composite resources inline. This means:
 - **One `kubectl apply`** provisions everything
-- **Lifecycle is tied** — deleting the cluster claim cascades to Agones and Istio resources
-- **Parameters flow down** — the EKS cluster endpoint and CA data discovered by Crossplane are passed automatically to the Istio package (no manual OIDC/CA copy step)
+- **Lifecycle is tied** - deleting the cluster claim cascades to Agones and Istio resources
+- **Parameters flow down** - the EKS cluster endpoint and CA data discovered by Crossplane are passed automatically to the Istio package (no manual OIDC/CA copy step)
 
 ### Why `portName: http-rest` on the Agones allocator service?
 
 The `http-` prefix is Istio's protocol sniffing convention. It tells Envoy to treat this port as HTTP/2 (which gRPC uses), enabling retries, timeouts, and header-based routing. Without this prefix, Istio treats the port as raw TCP and the VirtualService routing rules do not apply.
 
 ```yaml
-# In agones package — Istio mode
+# In agones package - Istio mode
 service:
   http:
     portName: http-rest   # ← "http-" prefix = Istio applies L7 routing
@@ -420,10 +420,10 @@ service:
 
 ### Why `AUTO_PASSTHROUGH` on the east-west gateway?
 
-The east-west gateway uses SNI routing — it reads the TLS SNI field to determine which backend service to forward to, without terminating the TLS session. This means:
+The east-west gateway uses SNI routing - it reads the TLS SNI field to determine which backend service to forward to, without terminating the TLS session. This means:
 - The allocator's mTLS identity is preserved end-to-end
 - No certificate pinning issues
-- The gateway configuration is static — it works for any service, not just Agones
+- The gateway configuration is static - it works for any service, not just Agones
 
 ---
 
@@ -459,7 +459,7 @@ retries:
 timeout: 6s
 ```
 
-`retryRemoteLocalities: true` is what enables automatic failover — if the target regional allocator returns a retryable error (no servers available, connection refused), Envoy retries against other subsets.
+`retryRemoteLocalities: true` is what enables automatic failover - if the target regional allocator returns a retryable error (no servers available, connection refused), Envoy retries against other subsets.
 
 ---
 
@@ -485,11 +485,11 @@ template:
     expireAfter: Never            # Don't force-cycle running nodes
 ```
 
-`WhenEmpty` is critical — `WhenUnderutilized` would evict game server pods mid-session.
+`WhenEmpty` is critical - `WhenUnderutilized` would evict game server pods mid-session.
 
 ### cert-manager CA rotation
 
-The Istio root CA has a 10-year validity with 30-day renewal notice. cert-manager handles rotation automatically. When the CA rotates, istiod picks up the new `cacerts` secret on the next reconciliation cycle — workload certificates are re-issued transparently.
+The Istio root CA has a 10-year validity with 30-day renewal notice. cert-manager handles rotation automatically. When the CA rotates, istiod picks up the new `cacerts` secret on the next reconciliation cycle - workload certificates are re-issued transparently.
 
 ---
 
