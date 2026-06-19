@@ -187,20 +187,20 @@ The matchmaker pod runs **inside one of the clusters** (e.g. us-east-1). It call
   ┌────────────────────────────────────────────────────────────────┐
   │                   │                                            │
   │  ┌────────────────▼───────────────────────┐                    │
-  │  │  East-west gateway (eu-west-1)          │                   │
-  │  │  Matches SNI → routes to local service  │                   │
+  │  │  East-west gateway (eu-west-1)         │                    │
+  │  │  Matches SNI → routes to local service │                    │
   │  └────────────────┬───────────────────────┘                    │
   │                   │                                            │
   │                   ▼                                            │
   │  ┌────────────────────────────────────────┐                    │
-  │  │  agones-allocator pod (eu-west-1)       │                   │
-  │  │  Finds a Ready GameServer               │                   │
-  │  │  Returns: NodeIP, port, credentials     │                   │
+  │  │  agones-allocator pod (eu-west-1)      │                    │
+  │  │  Finds a Ready GameServer              │                    │
+  │  │  Returns: NodeIP, port, credentials    │                    │
   │  └────────────────────────────────────────┘                    │
   │                                                                │
   │  ┌────────────────────────────────────────┐                    │
-  │  │  Karpenter game server nodes (SPOT)     │                   │
-  │  │  Fleet: 5 × Ready GameServer pods       │                   │
+  │  │  Karpenter game server nodes (SPOT)    │                    │
+  │  │  Fleet: 5 × Ready GameServer pods      │                    │
   │  └────────────────────────────────────────┘                    │
   └────────────────────────────────────────────────────────────────┘
 ```
