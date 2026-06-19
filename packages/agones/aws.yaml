@@ -262,7 +262,7 @@ spec:
                       {{- if $istioEnabled }}
                       # Istio mode: ClusterIP — east-west gateway handles cross-cluster routing
                       annotations:
-                        blitz.agones.dev/allocator-host: agones-allocator.agones-system.svc.cluster.local
+                        demo.agones.dev/allocator-host: agones-allocator.agones-system.svc.cluster.local
                       serviceType: ClusterIP
                       http:
                         enabled: true
