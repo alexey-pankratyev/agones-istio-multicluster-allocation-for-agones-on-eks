@@ -9,12 +9,14 @@ ACCOUNT_PLACEHOLDER := 123456789012
 # Auto-detect AWS account from current credentials when not set explicitly.
 AWS_ACCOUNT_ID    ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
 
-PACKAGES := packages/vpc packages/agones packages/istio packages/eks-cluster
+PACKAGES     := packages/vpc packages/agones packages/istio packages/eks-cluster
+CROSSPLANE_VERSION := 2.1.4
 
 # ─────────────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := help
 
-.PHONY: help deploy install-packages create-namespace apply-claims \
+.PHONY: help bootstrap-crossplane bootstrap-providers bootstrap-irsa bootstrap \
+        deploy install-packages create-namespace apply-claims \
         delete-claims delete-packages delete teardown \
         status trace-eu trace-us kubeconfig-eu kubeconfig-us check-prereqs \
         deploy-fleet reset-fleet alloc-local-eu alloc-local-us verify-mesh verify-allocation \
@@ -23,6 +25,13 @@ PACKAGES := packages/vpc packages/agones packages/istio packages/eks-cluster
 help:
 	@echo ""
 	@echo "  Multi-Region Agones + Istio on EKS — Crossplane demo"
+	@echo ""
+	@echo "  Management cluster bootstrap (run once on a fresh cluster):"
+	@echo "    make bootstrap                  # install Crossplane + providers + ProviderConfigs"
+	@echo "    make bootstrap-crossplane       # install Crossplane via Helm only"
+	@echo "    make bootstrap-providers        # apply bootstrap/providers.yaml"
+	@echo "    make bootstrap-irsa MGMT_CLUSTER=<name> REGION=<region>"
+	@echo "                                    # create IAM role + ProviderConfigs"
 	@echo ""
 	@echo "  Full deployment (one command):"
 	@echo "    make deploy                     # install packages + apply claims"
@@ -61,6 +70,66 @@ help:
 	@echo "    AWS_ACCOUNT_ID = $(AWS_ACCOUNT_ID)"
 	@echo "    NAMESPACE      = $(NAMESPACE)"
 	@echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bootstrap — run once to prepare a fresh management cluster.
+# ─────────────────────────────────────────────────────────────────────────────
+
+bootstrap-crossplane:
+	@echo "==> Adding Crossplane Helm repo..."
+	@helm repo add crossplane-stable https://charts.crossplane.io/stable 2>/dev/null; \
+		helm repo update crossplane-stable
+	@echo "==> Installing Crossplane $(CROSSPLANE_VERSION)..."
+	@helm upgrade --install crossplane crossplane-stable/crossplane \
+		--namespace crossplane-system --create-namespace \
+		--version $(CROSSPLANE_VERSION) --wait
+	@echo "    OK"
+
+bootstrap-providers:
+	@echo "==> Installing providers and functions (bootstrap/providers.yaml)..."
+	@kubectl apply -f bootstrap/providers.yaml
+	@echo "==> Waiting for providers to become Healthy (~2 min)..."
+	@kubectl wait provider \
+		upbound-provider-family-aws \
+		upbound-provider-aws-eks \
+		upbound-provider-aws-ec2 \
+		upbound-provider-aws-iam \
+		crossplane-contrib-provider-kubernetes \
+		crossplane-contrib-provider-helm \
+		--for=condition=Healthy --timeout=180s
+	@kubectl wait function \
+		function-go-templating \
+		function-auto-ready \
+		--for=condition=Healthy --timeout=120s
+	@echo "    OK"
+
+# bootstrap-irsa: creates the IAM role for provider-aws and applies ProviderConfigs.
+# Required variables:
+#   MGMT_CLUSTER — name of the management EKS cluster
+#   REGION       — AWS region of the management cluster  (default: eu-west-1)
+MGMT_CLUSTER ?=
+REGION       ?= eu-west-1
+
+bootstrap-irsa:
+	@[ -n "$(MGMT_CLUSTER)" ] || (echo "ERROR: set MGMT_CLUSTER=<your-cluster-name>" && exit 1)
+	@echo "==> Creating IAM role crossplane-provider-aws for cluster $(MGMT_CLUSTER)..."
+	@ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text) && \
+	OIDC=$$(aws eks describe-cluster --name $(MGMT_CLUSTER) --region $(REGION) \
+		--query 'cluster.identity.oidc.issuer' --output text | sed 's|https://||') && \
+	aws iam create-role --role-name crossplane-provider-aws \
+		--assume-role-policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"arn:aws:iam::$${ACCOUNT_ID}:oidc-provider/$${OIDC}\"},\"Action\":\"sts:AssumeRoleWithWebIdentity\",\"Condition\":{\"StringLike\":{\"$${OIDC}:sub\":\"system:serviceaccount:crossplane-system:provider-aws-*\"}}}]}" \
+		2>/dev/null || echo "    (role already exists, skipping create)" && \
+	aws iam attach-role-policy --role-name crossplane-provider-aws \
+		--policy-arn arn:aws:iam::aws:policy/AdministratorAccess && \
+	echo "    Role ARN: arn:aws:iam::$${ACCOUNT_ID}:role/crossplane-provider-aws"
+	@echo "==> Applying ProviderConfigs (bootstrap/provider-configs.yaml)..."
+	@kubectl apply -f bootstrap/provider-configs.yaml
+	@echo "    OK"
+
+bootstrap: bootstrap-crossplane bootstrap-providers
+	@echo ""
+	@echo "==> Crossplane is ready. Next step:"
+	@echo "    make bootstrap-irsa MGMT_CLUSTER=<your-cluster> REGION=<region>"
 
 # ─────────────────────────────────────────────────────────────────────────────
 check-prereqs:

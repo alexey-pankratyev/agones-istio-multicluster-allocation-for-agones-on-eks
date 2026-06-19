@@ -296,134 +296,19 @@ You need an existing EKS cluster to act as the management cluster (the cluster w
 
 #### Installing Crossplane on the management cluster
 
-```bash
-helm install crossplane crossplane-stable/crossplane \
-  --namespace crossplane-system --create-namespace \
-  --version 2.1.4
-
-# Install providers and functions
-kubectl apply -f - <<EOF
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: upbound-provider-family-aws
-spec:
-  package: xpkg.upbound.io/upbound/provider-family-aws:v1.19.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: upbound-provider-aws-eks
-spec:
-  package: xpkg.upbound.io/upbound/provider-aws-eks:v1.19.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: upbound-provider-aws-ec2
-spec:
-  package: xpkg.upbound.io/upbound/provider-aws-ec2:v1.19.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: upbound-provider-aws-iam
-spec:
-  package: xpkg.upbound.io/upbound/provider-aws-iam:v1.19.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: crossplane-contrib-provider-kubernetes
-spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-kubernetes:v1.2.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Provider
-metadata:
-  name: crossplane-contrib-provider-helm
-spec:
-  package: xpkg.upbound.io/crossplane-contrib/provider-helm:v1.1.0
----
-apiVersion: pkg.crossplane.io/v1
-kind: Function
-metadata:
-  name: function-go-templating
-spec:
-  package: xpkg.upbound.io/crossplane-contrib/function-go-templating:v0.11.3
----
-apiVersion: pkg.crossplane.io/v1
-kind: Function
-metadata:
-  name: function-auto-ready
-spec:
-  package: xpkg.upbound.io/crossplane-contrib/function-auto-ready:v0.6.0
-EOF
-```
-
-#### Configuring AWS access for provider-aws
-
-`provider-aws` needs IAM permissions to create EKS clusters, VPCs, IAM roles, and more. The recommended approach is **IRSA** (IAM Roles for Service Accounts) — no static credentials stored in the cluster.
+All bootstrap steps are automated via `make`. Provider and ProviderConfig manifests are in `bootstrap/`.
 
 ```bash
-# 1. Create an IAM role with AdministratorAccess (or a scoped policy)
-#    and trust the management cluster's OIDC provider.
-#    Replace the values with your management cluster details.
-MGMT_CLUSTER=my-management-cluster
-REGION=eu-west-1
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-OIDC=$(aws eks describe-cluster --name $MGMT_CLUSTER --region $REGION \
-  --query 'cluster.identity.oidc.issuer' --output text | sed 's|https://||')
+# Install Crossplane 2.1.4 and all required providers/functions
+make bootstrap
 
-aws iam create-role --role-name crossplane-provider-aws \
-  --assume-role-policy-document "{
-    \"Version\": \"2012-10-17\",
-    \"Statement\": [{
-      \"Effect\": \"Allow\",
-      \"Principal\": {\"Federated\": \"arn:aws:iam::${ACCOUNT_ID}:oidc-provider/${OIDC}\"},
-      \"Action\": \"sts:AssumeRoleWithWebIdentity\",
-      \"Condition\": {\"StringLike\": {
-        \"${OIDC}:sub\": \"system:serviceaccount:crossplane-system:provider-aws-*\"
-      }}
-    }]
-  }"
-
-aws iam attach-role-policy --role-name crossplane-provider-aws \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-
-# 2. Point the ProviderConfig at the role
-kubectl apply -f - <<EOF
-apiVersion: aws.upbound.io/v1beta1
-kind: ProviderConfig
-metadata:
-  name: default
-spec:
-  credentials:
-    source: IRSA
-EOF
+# Create the IAM role for provider-aws (IRSA) and apply ProviderConfigs
+make bootstrap-irsa MGMT_CLUSTER=<your-cluster-name> REGION=<region>
 ```
 
-For `provider-kubernetes` and `provider-helm`, a `ProviderConfig` with `source: InjectedIdentity` is sufficient — they use the management cluster's own service account:
+`bootstrap` installs Crossplane via Helm, then applies `bootstrap/providers.yaml` (all providers and functions with pinned versions) and waits for them to become Healthy.
 
-```bash
-kubectl apply -f - <<EOF
-apiVersion: kubernetes.crossplane.io/v1alpha1
-kind: ProviderConfig
-metadata:
-  name: default
-spec:
-  credentials:
-    source: InjectedIdentity
----
-apiVersion: helm.crossplane.io/v1beta1
-kind: ProviderConfig
-metadata:
-  name: default
-spec:
-  credentials:
-    source: InjectedIdentity
-EOF
-```
+`bootstrap-irsa` creates an IAM role `crossplane-provider-aws` with `AdministratorAccess`, trusting the management cluster's OIDC provider, then applies `bootstrap/provider-configs.yaml` (IRSA for `provider-aws`, `InjectedIdentity` for `provider-kubernetes` and `provider-helm`).
 
 A `Makefile` is included to run all deployment steps without memorising commands. Run `make` or `make help` to see all available targets.
 
